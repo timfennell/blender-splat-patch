@@ -6,6 +6,12 @@ dust, stray hairs, and the pin and the hole it leaves.
 
 Sidebar: **3D Viewport > N > Splat Patch**.
 
+## Install
+
+Download `gs_patch-*.zip` from [Releases](https://github.com/timfennell/blender-splat-patch/releases),
+then in Blender use **Edit > Preferences > Get Extensions > ⌄ > Install from Disk…** and pick the zip.
+Requires Blender 5.3 or newer.
+
 ## Tools (brush)
 
 Pick a tool button to start painting. While the brush is running:
