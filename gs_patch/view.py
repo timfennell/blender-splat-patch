@@ -16,31 +16,56 @@ class Projection:
         self.key = None
         self.sx = self.sy = self.depth = self.ok = None
 
-    def update(self, region, rv3d, S, matrix_world, revision):
+    def update(self, region, rv3d, S, matrix_world, revision, axes=None):
         key = (tuple(tuple(r) for r in rv3d.perspective_matrix), region.width,
                region.height, revision, tuple(tuple(r) for r in matrix_world))
         if key == self.key:
             return
         self.key = key
-        pos = S.pos
         P = np.array(rv3d.perspective_matrix @ matrix_world, np.float32)
         V = np.array(rv3d.view_matrix @ matrix_world, np.float32)
-        clip = pos @ P[:, :3].T + P[:, 3]
-        w = clip[:, 3]
-        self.ok = w > 1e-6
-        w = np.where(self.ok, w, 1.0)
-        self.sx = (clip[:, 0] / w * 0.5 + 0.5) * region.width
-        self.sy = (clip[:, 1] / w * 0.5 + 0.5) * region.height
+
+        def project(pts):
+            clip = pts @ P[:, :3].T + P[:, 3]
+            w = clip[:, 3]
+            ok = w > 1e-6
+            w = np.where(ok, w, 1.0)
+            return ((clip[:, 0] / w * 0.5 + 0.5) * region.width,
+                    (clip[:, 1] / w * 0.5 + 0.5) * region.height, ok)
+
+        pos = S.pos
+        self.sx, self.sy, self.ok = project(pos)
         self.depth = -(pos @ V[2, :3] + V[2, 3])
+        # Screen-space half axis of each splat's long axis, for needle-shaped splats.
+        self.ax = self.ay = None
+        if axes is not None:
+            ex, ey, ok_e = project(pos + axes)
+            self.ax = np.where(ok_e, ex - self.sx, 0.0)
+            self.ay = np.where(ok_e, ey - self.sy, 0.0)
+            self.reach = np.hypot(self.ax, self.ay)
 
-    def disc(self, mx, my, radius_px):
-        d2 = (self.sx - mx) ** 2 + (self.sy - my) ** 2
-        idx = np.nonzero(self.ok & (d2 < radius_px * radius_px))[0]
-        return idx, np.sqrt(d2[idx])
+    def disc(self, mx, my, radius_px, extents=False):
+        """Splats under a screen disc. With extents, any part of a splat's long axis counts."""
+        dx, dy = mx - self.sx, my - self.sy
+        d2 = dx * dx + dy * dy
+        if not extents or self.ax is None:
+            idx = np.nonzero(self.ok & (d2 < radius_px * radius_px))[0]
+            return idx, np.sqrt(d2[idx])
+        near = np.nonzero(self.ok & (np.sqrt(d2) < radius_px + self.reach))[0]
+        ax, ay = self.ax[near], self.ay[near]
+        t = np.clip((dx[near] * ax + dy[near] * ay) / np.maximum(ax * ax + ay * ay, 1e-12), -1, 1)
+        d = np.hypot(dx[near] - t * ax, dy[near] - t * ay)
+        keep = d < radius_px
+        return near[keep], d[keep]
 
-    def pick(self, S, mx, my, radius_px, min_opacity=0.2):
-        """Object-space point on the front splat surface under the mouse, or None."""
-        for r in (max(4.0, radius_px * 0.2), radius_px):
+    def pick(self, S, mx, my, radius_px):
+        """Object-space point on the front splat surface under the mouse, or None.
+
+        Prefers reasonably opaque splats, but falls back to faint ones so that
+        wisps floating in empty space can still be picked.
+        """
+        for r, min_opacity in ((max(4.0, radius_px * 0.2), 0.2), (radius_px, 0.2),
+                               (radius_px, 0.03), (radius_px, 0.0)):
             idx, _ = self.disc(mx, my, r)
             idx = idx[S.opacity[idx] > min_opacity]
             if len(idx) >= 3:
@@ -131,6 +156,14 @@ def cap(pos, rgba, limit=150000):
 
 def solid_rgba(n, color):
     return np.tile(np.asarray(color, np.float32), (n, 1))
+
+
+def draw_screen_ring(x, y, radius_px, color, width=1.5):
+    pts = [(x + radius_px * math.cos(a), y + radius_px * math.sin(a))
+           for a in (2 * math.pi * i / 64 for i in range(65))]
+    gpu.state.blend_set('ALPHA')
+    draw_lines([[(px, py, 0.0) for px, py in pts]], color, width)
+    gpu.state.blend_set('NONE')
 
 
 class Overlay:

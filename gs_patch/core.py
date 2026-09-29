@@ -85,10 +85,84 @@ def surface_frame(S, center, radius, view_dir, min_opacity=0.15):
     return c.astype(np.float32), n.astype(np.float32)
 
 
-def sphere_hits(pos, center, radius, feather):
+def segment_distance(point, pos, axes):
+    """Distance from point to each splat's long-axis segment pos +/- axes."""
+    rel = point - pos
+    t = np.clip((rel * axes).sum(1) / np.maximum((axes * axes).sum(1), 1e-20), -1.0, 1.0)
+    return np.linalg.norm(rel - t[:, None] * axes, axis=1)
+
+
+def sphere_hits(pos, center, radius, feather, axes=None):
+    """Splats inside the sphere. With axes, a splat counts if any part of its long axis does."""
     d = np.linalg.norm(pos - center, axis=1)
+    if axes is not None:
+        reach = np.linalg.norm(axes, axis=1)
+        near = np.nonzero(d < radius + reach)[0]
+        d_near = segment_distance(center, pos[near], axes[near])
+        d = np.full(len(pos), np.inf, np.float32)
+        d[near] = d_near
     idx = np.nonzero(d < radius)[0]
     return idx, feather_weight(d[idx], radius, feather)
+
+
+# ---------------------------------------------------------------- floaters
+_HALF_NEIGHBOURS = [(dx, dy, dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)
+                    if (dx, dy, dz) > (0, 0, 0)]
+
+
+def connected_components(pos, cell):
+    """Label splats by 26-connected occupancy on a voxel grid of the given cell size."""
+    ijk = np.floor((pos - pos.min(0)) / cell).astype(np.int64) + 1
+    dims = ijk.max(0) + 2
+    key = (ijk[:, 0] * dims[1] + ijk[:, 1]) * dims[2] + ijk[:, 2]
+    uk, inv = np.unique(key, return_inverse=True)
+    a_list, b_list = [], []
+    for dx, dy, dz in _HALF_NEIGHBOURS:
+        nk = uk + (dx * dims[1] + dy) * dims[2] + dz
+        at = np.clip(np.searchsorted(uk, nk), 0, len(uk) - 1)
+        m = uk[at] == nk
+        a_list.append(np.nonzero(m)[0])
+        b_list.append(at[m])
+    a, b = np.concatenate(a_list), np.concatenate(b_list)
+    label = np.arange(len(uk))
+    while True:
+        la, lb = label[a], label[b]
+        low = np.minimum(la, lb)
+        new = label.copy()
+        np.minimum.at(new, la, low)   # hook both roots onto the smaller label
+        np.minimum.at(new, lb, low)
+        while True:                   # pointer jumping
+            nxt = new[new]
+            if np.array_equal(nxt, new):
+                break
+            new = nxt
+        if np.array_equal(new, label):
+            break
+        label = new
+    return label[np.asarray(inv).ravel()]
+
+
+def auto_gap(S):
+    scale = S.get("scale")
+    if scale is None:
+        extent = np.linalg.norm(S.pos.max(0) - S.pos.min(0))
+        return float(extent / 150.0)
+    return float(4.0 * np.median(scale.max(1)))
+
+
+def floater_mask(S, gap=0.0, keep_fraction=0.02):
+    """Splats in clumps that don't touch the main body.
+
+    Clumps are splats joined by chains with no hole wider than about `gap`. Every
+    clump smaller than keep_fraction of the largest one is marked.
+    """
+    if S.n == 0:
+        return np.zeros(0, bool), 0.0
+    cell = gap if gap > 0 else auto_gap(S)
+    comp = connected_components(S.pos, cell)
+    _, inverse, counts = np.unique(comp, return_inverse=True, return_counts=True)
+    size = counts[inverse]
+    return size < keep_fraction * counts.max(), cell
 
 
 def ring_mean_dc(S, center, radius, exclude=None):

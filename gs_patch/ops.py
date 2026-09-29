@@ -6,7 +6,7 @@ from bpy_extras.io_utils import ExportHelper
 from mathutils import Vector
 
 from . import core, view
-from .splats import SplatSet, is_splat_object
+from .splats import SplatSet, is_splat_object, major_axes, SELECT_ATTR
 from .ply_io import write_splat_ply
 
 TOOL_ITEMS = [
@@ -21,6 +21,8 @@ _REV_KEY = "gsp_revision"
 
 # Whether a brush modal is running (module state, so a crash never leaves a stale flag in the file).
 STATE = {"running": False}
+
+PAINT_TOOLS = {'ERASE', 'SELECT', 'SPOT'}
 
 HELP = {
     'ERASE': "LMB paint erase",
@@ -99,6 +101,7 @@ class GSP_OT_brush(bpy.types.Operator):
         self.hit = None
         self.hit_normal = None
         self.last_dab = None
+        self.stroke_ctrl = False
         self.mouse = (0, 0)
         self.offset = None          # clone: destination - source, in object space
         self.stroke_src_start = None
@@ -109,6 +112,7 @@ class GSP_OT_brush(bpy.types.Operator):
         self.overlay_settings.show_outline_selected = False
         self.shown_tool = None
         self._handle = bpy.types.SpaceView3D.draw_handler_add(self.draw_overlay, (), 'WINDOW', 'POST_VIEW')
+        self._handle_px = bpy.types.SpaceView3D.draw_handler_add(self.draw_overlay_px, (), 'WINDOW', 'POST_PIXEL')
         context.window_manager.modal_handler_add(self)
         STATE["running"] = True
         self.status(context)
@@ -116,6 +120,7 @@ class GSP_OT_brush(bpy.types.Operator):
 
     def load(self):
         self.S = core_S = SplatSet.read(self.obj.data)
+        self.axes = major_axes(core_S)
         self.rev = int(self.obj.data.get(_REV_KEY, 0))
         self.ptr = self.obj.data.as_pointer()
         return core_S
@@ -130,6 +135,9 @@ class GSP_OT_brush(bpy.types.Operator):
         if self._handle:
             bpy.types.SpaceView3D.draw_handler_remove(self._handle, 'WINDOW')
             self._handle = None
+        if self._handle_px:
+            bpy.types.SpaceView3D.draw_handler_remove(self._handle_px, 'WINDOW')
+            self._handle_px = None
         STATE["running"] = False
         try:
             self.overlay_settings.show_outline_selected = self.had_outline
@@ -150,7 +158,7 @@ class GSP_OT_brush(bpy.types.Operator):
     def update_hit(self, context, mx, my):
         p = props_of(context)
         mw = self.obj.matrix_world
-        self.proj.update(self.region, self.rv3d, self.S, mw, self.rev)
+        self.proj.update(self.region, self.rv3d, self.S, mw, self.rev, self.axes)
         hit = self.proj.pick(self.S, mx, my, p.radius_px)
         if hit is None:
             self.hit = None
@@ -174,12 +182,14 @@ class GSP_OT_brush(bpy.types.Operator):
         S = self.S
         R = self.radius
         feather = p.feather
-        if p.tool in {'ERASE', 'SELECT', 'SPOT'}:
-            if p.depth_mode == 'THROUGH':
-                idx, dpx = self.proj.disc(mx, my, p.radius_px)
+        if p.tool in PAINT_TOOLS:
+            # Through mode, or nothing solid under the mouse (wisps in empty space):
+            # take everything under the brush circle at any depth.
+            if p.depth_mode == 'THROUGH' or self.hit is None:
+                idx, dpx = self.proj.disc(mx, my, p.radius_px, extents=True)
                 w = core.feather_weight(dpx, p.radius_px, feather)
             else:
-                idx, w = core.sphere_hits(S.pos, self.hit, R, feather)
+                idx, w = core.sphere_hits(S.pos, self.hit, self.radius, feather, self.axes)
             if p.tool == 'ERASE':
                 st.erase(idx, w, p.strength)
             elif p.tool == 'SELECT':
@@ -194,7 +204,7 @@ class GSP_OT_brush(bpy.types.Operator):
             st.clone(cs, ns, cd, nd, R, feather, replace=p.replace,
                      heal=p.heal_strength if p.tool == 'HEAL' else 0.0)
             self.src_ring = (cs, ns)
-        self.last_dab = self.hit.copy()
+        self.last_dab = (mx, my)
 
     # ---------------------------------------------------------- modal
     def modal(self, context, event):
@@ -247,16 +257,16 @@ class GSP_OT_brush(bpy.types.Operator):
 
         if event.type == 'MOUSEMOVE':
             self.update_hit(context, mx, my)
-            if self.stroke is not None and self.hit is not None:
-                spacing = max(self.radius * p.spacing, 1e-9)
-                if self.last_dab is None or np.linalg.norm(self.hit - self.last_dab) >= spacing:
+            if self.stroke is not None and (self.hit is not None or p.tool in PAINT_TOOLS):
+                spacing = max(p.radius_px * p.spacing, 1.0)
+                if self.last_dab is None or np.hypot(mx - self.last_dab[0], my - self.last_dab[1]) >= spacing:
                     self.dab(context, mx, my, event.ctrl)
             return {'RUNNING_MODAL'}
 
         if event.type == 'LEFTMOUSE':
             if event.value == 'PRESS':
                 self.update_hit(context, mx, my)
-                if self.hit is None:
+                if self.hit is None and p.tool not in PAINT_TOOLS:
                     return {'RUNNING_MODAL'}
                 if p.tool in {'CLONE', 'HEAL'}:
                     if event.ctrl or event.alt:
@@ -311,6 +321,7 @@ class GSP_OT_brush(bpy.types.Operator):
             self.load()
             raise
         self.ptr = self.obj.data.as_pointer()
+        self.axes = major_axes(self.S)
         self.proj.key = None
 
     # ---------------------------------------------------------- drawing
@@ -332,15 +343,12 @@ class GSP_OT_brush(bpy.types.Operator):
         st = self.stroke
         tool = p.tool
 
-        # Selection
-        if p.show_selection and S.n:
-            sel = S.selected
-            if st is not None and tool == 'SELECT':
-                sel = (sel & ~st.select) if self.stroke_ctrl else (sel | st.select)
-            idx = np.nonzero(sel)[0]
+        if st is not None and tool == 'SELECT':
+            idx = np.nonzero(st.select)[0]
             if len(idx):
-                pos, rgba = view.cap(S.pos[idx], view.solid_rgba(1, (1.0, 0.55, 0.1, 0.9)))
-                ov.points.append((pos, np.broadcast_to(rgba[0], (len(pos), 4)).copy(), 2.0))
+                col = (0.35, 0.35, 0.4, 0.9) if self.stroke_ctrl else (1.0, 0.55, 0.1, 0.9)
+                pos, rgba = view.cap(S.pos[idx], view.solid_rgba(len(idx), col))
+                ov.points.append((pos, rgba, 2.0))
 
         if st is not None:
             if tool == 'ERASE':
@@ -385,8 +393,59 @@ class GSP_OT_brush(bpy.types.Operator):
             ov.rings.append((src, (0, 0, 1), 0.02, (0.3, 0.6, 1.0, 0.9), 2.0))
         ov.draw()
 
+    def draw_overlay_px(self):
+        # Screen circle when nothing solid is under the mouse, so the brush is
+        # still visible (and usable) over wisps in empty space.
+        try:
+            area = bpy.context.area
+            if area is None or area.as_pointer() != self.area.as_pointer() or self.hit is not None:
+                return
+            p = bpy.context.scene.gsp
+            if p.tool not in PAINT_TOOLS:
+                return
+            view.draw_screen_ring(self.mouse[0], self.mouse[1], p.radius_px, (1.0, 1.0, 1.0, 0.7))
+            if p.feather > 0:
+                view.draw_screen_ring(self.mouse[0], self.mouse[1], p.radius_px * (1 - p.feather),
+                                      (1.0, 1.0, 1.0, 0.3))
+        except ReferenceError:
+            pass
+
 
 # =====================================================================
+_SEL_CACHE = {"key": None, "pos": None}
+
+
+def draw_selection():
+    """Draw selected splats of the active splat object (registered for every 3D view)."""
+    ctx = bpy.context
+    p = getattr(ctx.scene, "gsp", None)
+    obj = ctx.active_object
+    if p is None or not p.show_selection or not is_splat_object(obj):
+        return
+    pc = obj.data
+    attr = pc.attributes.get(SELECT_ATTR)
+    n = len(pc.points)
+    if attr is None or n == 0:
+        return
+    key = (pc.as_pointer(), int(pc.get(_REV_KEY, 0)), n)
+    if key != _SEL_CACHE["key"]:
+        sel = np.empty(n, bool)
+        attr.data.foreach_get("value", sel)
+        pos = None
+        if sel.any():
+            allpos = np.empty(n * 3, np.float32)
+            pc.attributes["position"].data.foreach_get("vector", allpos)
+            pos, _ = view.cap(allpos.reshape(n, 3)[sel], None)
+        _SEL_CACHE.update(key=key, pos=pos)
+    pos = _SEL_CACHE["pos"]
+    if pos is None:
+        return
+    ov = view.Overlay()
+    ov.matrix = obj.matrix_world
+    ov.points.append((pos, view.solid_rgba(len(pos), (1.0, 0.55, 0.1, 0.9)), 2.0))
+    ov.draw()
+
+
 class _SplatOp:
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -431,6 +490,24 @@ class GSP_OT_select_faint(_SplatOp, bpy.types.Operator):
         S.write(obj.data)
         bump_revision(obj)
         self.report({'INFO'}, f"Selected {int(m.sum())} faint splats")
+        return {'FINISHED'}
+
+
+class GSP_OT_select_floaters(_SplatOp, bpy.types.Operator):
+    """Add splats that aren't connected to the main specimen (stray wisps, leftovers) to the selection"""
+    bl_idname = "gsp.select_floaters"
+    bl_label = "Select Floaters"
+
+    def execute(self, context):
+        obj = active_splats(context)
+        p = props_of(context)
+        S = SplatSet.read(obj.data)
+        scale = sum(abs(s) for s in obj.matrix_world.to_scale()) / 3.0
+        m, cell = core.floater_mask(S, p.floater_gap / max(scale, 1e-12), p.floater_keep)
+        S.selected[m] = True
+        S.write(obj.data)
+        bump_revision(obj)
+        self.report({'INFO'}, f"Selected {int(m.sum())} floating splats (gap {cell * scale:.4g})")
         return {'FINISHED'}
 
 
@@ -556,6 +633,7 @@ classes = (
     GSP_OT_brush,
     GSP_OT_select_all,
     GSP_OT_select_faint,
+    GSP_OT_select_floaters,
     GSP_OT_select_cursor_sphere,
     GSP_OT_delete_selected,
     GSP_OT_fill_selected,

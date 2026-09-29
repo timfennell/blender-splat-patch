@@ -21,7 +21,10 @@ Pick a tool button to start painting. While the brush is running:
 
 MMB, the scroll wheel and trackpad gestures still navigate the view. Each stroke is one undo step.
 
-- **Erase**: deletes splats; the feather fades them instead.
+- **Erase**: deletes splats; the feather fades them instead. Erase, Select and Spot Heal also work over
+  empty space: with nothing solid under the brush (a white circle), they take everything under the
+  circle at any depth. Needle-shaped splats count wherever their length crosses the brush, not just at
+  their centre.
 - **Select**: paints a region to use with the Selection & Fill buttons.
 - **Clone**: works like Photoshop's clone stamp. Ctrl+click a clean area, then paint over the defect. The splats
   are rotated to fit the target surface's normal. *Aligned* keeps the offset between strokes.
@@ -32,7 +35,10 @@ MMB, the scroll wheel and trackpad gestures still navigate the view. Each stroke
 ## Selection & Fill (the sample / edit / fill volumes)
 
 1. Select the volume to remove: paint with **Select**, use **Select Around Cursor** (sphere at the 3D
-   cursor), or **Select Faint Splats** (haze and floaters).
+   cursor), **Select Faint Splats** (near-transparent haze), or **Select Floaters**. Floaters are clumps
+   not connected to the specimen, such as wisps left where a pin was. *Gap* sets how far apart splats can
+   be and still count as connected (0 = automatic). *Keep* protects clumps at least that fraction of the
+   largest one, such as a detached leg.
 2. **Delete Selected**, or
 3. **Fill From Surroundings** (spot-heal the selection), or **Fill From Sample**: clone the area around
    the sample point into the gap, trimmed to the gap's footprint, feathered and colour-matched.

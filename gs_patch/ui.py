@@ -40,6 +40,12 @@ class GSP_Props(bpy.types.PropertyGroup):
                                      description="Regrown splat density relative to the surroundings")
     cursor_radius: bpy.props.FloatProperty(name="Radius", default=0.1, min=0.0, unit='LENGTH')
     show_selection: bpy.props.BoolProperty(name="Show Selection", default=True)
+    floater_gap: bpy.props.FloatProperty(
+        name="Gap", default=0.0, min=0.0, unit='LENGTH',
+        description="Splats separated from the specimen by more than this count as floaters (0 = automatic)")
+    floater_keep: bpy.props.FloatProperty(
+        name="Keep Clumps Above", default=0.02, min=0.0, max=1.0, subtype='FACTOR',
+        description="Clumps at least this fraction of the largest one are kept (e.g. detached legs)")
 
 
 class GSP_PT_panel(bpy.types.Panel):
@@ -148,6 +154,11 @@ class GSP_PT_selection(bpy.types.Panel):
         row.operator("gsp.select_cursor_sphere", icon='CURSOR')
         row.prop(p, "cursor_radius", text="")
         layout.operator("gsp.select_faint", icon='GHOST_ENABLED')
+        col = layout.column(align=True)
+        col.operator("gsp.select_floaters", icon='OUTLINER_DATA_POINTCLOUD')
+        row = col.row(align=True)
+        row.prop(p, "floater_gap")
+        row.prop(p, "floater_keep", text="Keep")
         layout.separator()
         layout.operator("gsp.delete_selected", icon='TRASH')
         col = layout.column(align=True)

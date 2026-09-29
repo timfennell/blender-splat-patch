@@ -136,3 +136,30 @@ class SplatSet:
                 new = entry[1][src_idx]
             entry[1] = np.concatenate([entry[1], np.asarray(new, entry[1].dtype)], axis=0)
         self.n += len(src_idx)
+
+
+def major_axes(S, sigmas=2.0):
+    """Half-length vector of each splat's longest axis (object space), sigmas deep.
+
+    Needle-shaped splats draw far from their centre, so hit tests use the segment
+    centre +/- this vector rather than the centre alone.
+    """
+    scale = S.get("scale")
+    rot = S.get("rotation")
+    if scale is None:
+        return np.zeros((S.n, 3), np.float32)
+    k = np.argmax(scale, axis=1)
+    length = scale[np.arange(S.n), k] * sigmas
+    if rot is None:
+        axes = np.zeros((S.n, 3), np.float32)
+        axes[np.arange(S.n), k] = 1.0
+        return axes * length[:, None]
+    q = rot / np.maximum(np.linalg.norm(rot, axis=1, keepdims=True), 1e-12)
+    w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+    cols = (
+        np.stack([1 - 2 * (y * y + z * z), 2 * (x * y + w * z), 2 * (x * z - w * y)], 1),
+        np.stack([2 * (x * y - w * z), 1 - 2 * (x * x + z * z), 2 * (y * z + w * x)], 1),
+        np.stack([2 * (x * z + w * y), 2 * (y * z - w * x), 1 - 2 * (x * x + y * y)], 1),
+    )
+    axes = np.where((k == 0)[:, None], cols[0], np.where((k == 1)[:, None], cols[1], cols[2]))
+    return (axes * length[:, None]).astype(np.float32)
