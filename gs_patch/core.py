@@ -41,6 +41,64 @@ def rotation_between(n_from, n_to):
     return np.array(q.to_matrix(), np.float32), np.array(q, np.float32)
 
 
+# ------------------------------------------------ view-dependent colour (SH)
+# Real spherical harmonic basis used by 3DGS for bands 1-3, in the order of the
+# f_rest / radiance:sh_k coefficients (band 1 = k 0..2, band 2 = 3..7, band 3 = 8..14).
+_SH_C1 = 0.4886025119029199
+_SH_C2 = (1.0925484305920792, -1.0925484305920792, 0.31539156525252005,
+          -1.0925484305920792, 0.5462742152960396)
+_SH_C3 = (-0.5900435899266435, 2.890611442640554, -0.4570457994644658, 0.3731763325901154,
+          -0.4570457994644658, 1.445305721320277, -0.5900435899266435)
+_SH_BANDS = ((0, 3), (3, 8), (8, 15))
+
+
+def sh_basis(d):
+    """Bands 1-3 of the 3DGS SH basis at unit directions d (M, 3); returns [(M,3), (M,5), (M,7)]."""
+    x, y, z = d[:, 0], d[:, 1], d[:, 2]
+    xx, yy, zz = x * x, y * y, z * z
+    b1 = np.stack([-_SH_C1 * y, _SH_C1 * z, -_SH_C1 * x], 1)
+    c = _SH_C2
+    b2 = np.stack([c[0] * x * y, c[1] * y * z, c[2] * (2 * zz - xx - yy),
+                   c[3] * x * z, c[4] * (xx - yy)], 1)
+    c = _SH_C3
+    b3 = np.stack([c[0] * y * (3 * xx - yy), c[1] * x * y * z, c[2] * y * (4 * zz - xx - yy),
+                   c[3] * z * (2 * zz - 3 * xx - 3 * yy), c[4] * x * (4 * zz - xx - yy),
+                   c[5] * z * (xx - yy), c[6] * x * (xx - 3 * yy)], 1)
+    return [b1, b2, b3]
+
+
+def sh_rotation_matrices(rot_m):
+    """Per-band matrices M so that coefficients c' = M @ c describe the colour rotated by rot_m.
+
+    Rotating a splat by R should give colour f'(d) = f(R^T d). Each band's basis
+    functions evaluated at R^T d are an exact linear mix of the same band at d,
+    so that mix is recovered by least squares over sample directions. That avoids
+    hand-deriving Wigner matrices and matches the basis used above by construction.
+    """
+    rng = np.random.default_rng(12345)
+    d = rng.normal(size=(64, 3))
+    d /= np.linalg.norm(d, axis=1, keepdims=True)
+    rot_m = np.asarray(rot_m, np.float64)
+    at_d = sh_basis(d)
+    at_rd = sh_basis(d @ rot_m)          # rows are R^T d
+    # basis(R^T d) = basis(d) @ X, so f' = sum_m c_m basis_m(R^T d) has coefficients X @ c.
+    return [np.linalg.lstsq(a, b, rcond=None)[0] for a, b in zip(at_d, at_rd)]
+
+
+def rotate_sh(S, idx, rot_m):
+    """Higher-order SH of splats idx, rotated by rot_m. Returns {attr name: (len(idx), 3)}."""
+    names = S.sh_names()
+    if not names:
+        return {}
+    coeffs = np.stack([S.get(n)[idx] for n in names], axis=1).astype(np.float64)  # (N, K, 3)
+    out = coeffs.copy()
+    for (lo, hi), M in zip(_SH_BANDS, sh_rotation_matrices(rot_m)):
+        if hi > len(names):
+            break
+        out[:, lo:hi, :] = np.einsum('km,nmc->nkc', M, coeffs[:, lo:hi, :])
+    return {n: out[:, i, :].astype(np.float32) for i, n in enumerate(names)}
+
+
 def fit_frame(points, weights=None, iterations=2):
     """Robust plane fit. Returns centroid, tangent e1, tangent e2, normal, inlier mask.
 
@@ -197,7 +255,7 @@ class Stroke:
         self.hole = np.zeros(n, bool)
         self.used_src = np.zeros(n, bool)
         self.clone_src, self.clone_pos, self.clone_rot = [], [], []
-        self.clone_w, self.clone_dc_shift = [], []
+        self.clone_w, self.clone_dc_shift, self.clone_sh = [], [], []
         self.dirty = True
 
     # --- dabs
@@ -232,6 +290,7 @@ class Stroke:
         self.clone_pos.append((S.pos[idx] - cs) @ rot_m.T + cd)
         rot = S.get("rotation")
         self.clone_rot.append(None if rot is None else quat_mul(rot_q, rot[idx]))
+        self.clone_sh.append(rotate_sh(S, idx, rot_m))
         self.clone_w.append(w)
         shift = np.zeros(3, np.float32)
         if heal > 0.0:
@@ -273,6 +332,8 @@ class Stroke:
                 if feather_opacity:
                     b[:, 3] *= np.concatenate(self.clone_w)
                 overrides[BASE_ATTR] = b
+            for name in S.sh_names():
+                overrides[name] = np.concatenate([sh[name] for sh in self.clone_sh])
             overrides["gsp_selected"] = np.zeros((len(src), 1), bool)
             S.append_copies(src, overrides)
             added = len(src)
@@ -507,6 +568,7 @@ def heal_fill(S, hole_mask, border=0.0, roughness=1.0, color_smooth=0.5, density
         rot = S.get("rotation")
         if rot is not None:
             overrides["rotation"] = quat_mul(rot_q, rot[src])
+        overrides.update(rotate_sh(S, src, rot_m))
         if base is not None:
             nb_ = base[src].copy()
             if heal > 0:

@@ -33,7 +33,8 @@ MMB, the scroll wheel and trackpad gestures still navigate the view. Each stroke
   their centre.
 - **Select**: paints a region to use with the Selection & Fill buttons.
 - **Clone**: works like Photoshop's clone stamp. Ctrl+click a clean area, then paint over the defect. The splats
-  are rotated to fit the target surface's normal. *Aligned* keeps the offset between strokes.
+  are rotated to fit the target surface's normal, including their view-dependent colour (SH bands 1–3),
+  so highlights and sheen turn with the surface. *Aligned* keeps the offset between strokes.
   *Replace Destination* removes what was there, crossfading across the feather.
 - **Heal**: clones like Clone, then shifts the colour to match the ring around the destination.
 - **Spot Heal**: paint over a speck; it is deleted and new splats are grown from the surrounding surface.
@@ -60,7 +61,6 @@ the original file exactly. Positions are written in object space (the object tra
 
 ## Limits
 
-- Cloned splats are rotated, but their higher-order SH (view-dependent colour) is not; the DC colour is exact.
 - The brush reads the whole cloud when it starts and each stroke is applied on release, so very large
   scans (millions of splats) take a moment per stroke.
 
