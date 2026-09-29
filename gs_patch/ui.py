@@ -111,8 +111,10 @@ class GSP_PT_brush(bpy.types.Panel):
         col.prop(p, "radius_px")
         col.prop(p, "feather", slider=True)
         col.prop(p, "spacing")
-        if p.tool in {'ERASE', 'SELECT', 'SPOT', 'RESTORE'}:
+        if p.tool in {'ERASE', 'SELECT', 'RESTORE'}:
             col.prop(p, "depth_mode", expand=True)
+        if p.tool == 'SPOT':
+            col.prop(p, "heal_strength", slider=True)
         if p.tool == 'RESTORE':
             col.prop(p, "restore_erased", toggle=True, icon='RECOVER_LAST')
             col.prop(p, "remove_added", toggle=True, icon='TRASH')

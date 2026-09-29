@@ -83,7 +83,10 @@ Strokes don't create Blender undo steps (on big scans each would copy the whole 
   so highlights and sheen turn with the surface. *Aligned* keeps the offset between strokes.
   *Replace Destination* removes what was there, crossfading across the feather.
 - **Heal**: clones like Clone, then shifts the colour to match the ring around the destination.
-- **Spot Heal**: paint over a speck; it is deleted and new splats are grown from the surrounding surface.
+- **Spot Heal**: size the brush to cover the blemish (F) and paint over it. Like Photoshop's spot healing
+  brush, it picks a matching patch nearby by itself (same surface direction, similar surroundings), clones it
+  over the spot and matches the colour. It works on the front surface you're looking at, so Surface/Through
+  doesn't matter. For a hole that's already empty, use Bridge instead.
 ![Painting a bridge over the hole the pin left](docs/images/bridge.jpg)
 
 - **Bridge**: for a hole that is already empty (e.g. after erasing a pin). Look at the hole and paint over

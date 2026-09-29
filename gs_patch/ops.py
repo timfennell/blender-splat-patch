@@ -54,7 +54,7 @@ HELP = {
     'SELECT': "LMB select · hold Option/Alt (or Ctrl) to deselect",
     'CLONE': "Ctrl+LMB set sample · LMB clone",
     'HEAL': "Ctrl+LMB set sample · LMB heal",
-    'SPOT': "LMB paint over blemish",
+    'SPOT': "LMB paint over the blemish; a matching nearby patch is cloned over it",
 }
 
 
@@ -243,8 +243,11 @@ class GSP_OT_brush(bpy.types.Operator):
         S = self.S
         R = self.radius
         feather = p.feather
-        if p.tool == 'BRIDGE':
+        if p.tool in {'BRIDGE', 'SPOT'}:
             self.bridge_centres.append((mx, my))
+            if p.tool == 'SPOT' and self.hit is not None:
+                self.spot_dabs.append((self.hit_anchor.copy(), self.hit_normal.copy(), self.radius,
+                                       self.view_dir.copy()))
         elif p.tool == 'RESTORE':
             self.restore_dab(context, mx, my)
         elif p.tool in PAINT_TOOLS:
@@ -368,6 +371,7 @@ class GSP_OT_brush(bpy.types.Operator):
                         self.offset = self.hit - src
                 self.stroke = core.Stroke(self.S)
                 self.bridge_centres = []
+                self.spot_dabs = []
                 self.rs_remove = np.zeros(self.S.n, bool)
                 self.rs_unfade = np.zeros(self.S.n, bool)
                 self.rs_restore = np.zeros(0 if self.T is None else self.T.n, bool)
@@ -398,13 +402,7 @@ class GSP_OT_brush(bpy.types.Operator):
             elif p.tool == 'RESTORE':
                 self.end_restore(context)
             elif p.tool == 'SPOT':
-                if not st.hole.any():
-                    return
-                removed, added, msg = core.heal_fill(
-                    S, st.hole, border=p.border_width, roughness=p.roughness,
-                    color_smooth=p.color_smooth, density=p.density, seed=int(time.time()))
-                self.report({'INFO'}, f"{msg}: -{removed} +{added}")
-                self.rev = commit(context, self.obj, S, "Splat spot heal")
+                self.end_spot(context)
             else:
                 faded_before = int(S.faded.sum())
                 removed, added = st.commit_clones_and_erase(p.use_opacity_feather)
@@ -591,12 +589,82 @@ class GSP_OT_brush(bpy.types.Operator):
             S, ring, near, in_footprint, toward, edge=edge, roughness=p.roughness, color_smooth=p.color_smooth,
             density=p.density, source=source, heal=p.heal_strength, feather=p.feather,
             seed=int(time.time()))
-        self.last_bridge = (len(ring), added, msg)
-        if added == 0:
+        self.last_bridge = (len(ring), removed, added, msg)
+        if added == 0 and removed == 0:
             self.report({'WARNING'}, msg)
             return
         self.report({'INFO'}, f"{msg}: +{added} splats")
         self.rev = commit(context, self.obj, S, "Splat bridge")
+
+    def end_spot(self, context):
+        """Spot Heal: clone a nearby patch over the spot and match its colour to the spot's surroundings.
+
+        Like Photoshop's spot healing brush, the source is chosen automatically: eight
+        candidate patches around the painted area are tried, and the one whose surface
+        faces the same way and whose surroundings best match the spot's is cloned in,
+        replacing what was under the brush with a feathered, colour-matched patch.
+        """
+        p = props_of(context)
+        S = self.S
+        dabs = self.spot_dabs
+        if not dabs:
+            self.report({'WARNING'}, "Paint over the surface to heal it")
+            return
+        anchors = np.array([d[0] for d in dabs], np.float32)
+        normals = np.array([d[1] for d in dabs], np.float32)
+        R = float(np.median([d[2] for d in dabs]))
+        cd0 = anchors.mean(0)
+        nd0 = normals.mean(0)
+        nd0 /= max(np.linalg.norm(nd0), 1e-9)
+        extent = float(np.max(np.linalg.norm(anchors - cd0, axis=1))) if len(anchors) > 1 else 0.0
+        reach = extent + R
+        t1 = np.cross(nd0, [0.0, 0.0, 1.0] if abs(nd0[2]) < 0.9 else [1.0, 0.0, 0.0])
+        t1 /= np.linalg.norm(t1)
+        t2 = np.cross(nd0, t1)
+        target = core.ring_mean_dc(S, cd0, reach)
+        # How much surface the spot itself has: a source must have a comparable amount.
+        own = S.near(cd0, reach)
+        own = own[S.visible[own] & (S.opacity[own] > 0.2) & (np.linalg.norm(S.pos[own] - cd0, axis=1) < reach)]
+        need = max(3, int(0.4 * len(own)))
+        dens_d = None
+        best = None
+        for dist in (reach + 1.5 * R, reach + 3.0 * R):
+            for k in range(8):
+                ang = 2 * np.pi * k / 8
+                probe = cd0 + (np.cos(ang) * t1 + np.sin(ang) * t2) * dist
+                cs, ns = core.surface_frame(S, probe, R, -nd0)
+                facing = float(np.dot(ns, nd0))
+                if facing < 0.6:
+                    continue
+                cand = S.near(cs, reach)
+                live = cand[S.visible[cand] & (S.opacity[cand] > 0.2)]
+                live = live[np.linalg.norm(S.pos[live] - cs, axis=1) < reach]
+                if len(live) < need:
+                    continue
+                if dens_d is None:
+                    cand_d = S.near(cd0, reach * 1.6)
+                    dd = np.linalg.norm(S.pos[cand_d] - cd0, axis=1)
+                    ring_d = cand_d[(dd > reach) & (dd < reach * 1.6) & S.visible[cand_d] & (S.opacity[cand_d] > 0.2)]
+                    area = np.pi * ((reach * 1.6) ** 2 - reach ** 2)
+                    dens_d = max(len(ring_d) / area, 1e-9)
+                dens_s = len(live) / (np.pi * reach ** 2)
+                colour = core.ring_mean_dc(S, cs, reach)
+                cdiff = 0.0 if (target is None or colour is None) else float(np.linalg.norm(colour - target))
+                score = cdiff + 0.5 * abs(np.log(dens_s / dens_d)) + 0.5 * (1 - facing)
+                if best is None or score < best[0]:
+                    best = (score, cs, dist)
+        if best is None:
+            self.report({'WARNING'}, "No similar surface nearby to heal from; try Bridge or Clone")
+            return
+        offset = best[1] - cd0
+        st = core.Stroke(S)
+        for anc, nrm, r_, vd in dabs:
+            cs, ns = core.surface_frame(S, anc + offset, r_, vd)
+            st.clone(cs, ns, anc, nrm, r_, max(p.feather, 0.25), replace=True, heal=p.heal_strength)
+        removed, added = st.commit_clones_and_erase(True)
+        self.spot_source = best[1]
+        self.report({'INFO'}, f"Healed from a nearby patch: replaced {removed}, added {added}")
+        self.rev = commit(context, self.obj, S, "Splat spot heal")
 
     # ---------------------------------------------------------- drawing
     def draw_overlay(self):
@@ -635,11 +703,6 @@ class GSP_OT_brush(bpy.types.Operator):
                                             0.15 * np.ones_like(a), 0.35 + 0.6 * a]).astype(np.float32)
                     pos, rgba = view.cap(S.pos[idx], rgba)
                     ov.points.append((pos, rgba, 2.0))
-            elif tool == 'SPOT':
-                idx = np.nonzero(st.hole)[0]
-                if len(idx):
-                    pos, rgba = view.cap(S.pos[idx], view.solid_rgba(len(idx), (1.0, 0.2, 0.8, 0.8)))
-                    ov.points.append((pos, rgba, 2.0))
             elif tool in {'CLONE', 'HEAL'}:
                 pos, rgb = st.clone_preview()
                 if pos is not None:
@@ -647,7 +710,7 @@ class GSP_OT_brush(bpy.types.Operator):
                     pos, rgba = view.cap(pos, rgba)
                     ov.points.append((pos, rgba, 2.5))
 
-        if self.hit is not None and tool != 'BRIDGE':
+        if self.hit is not None and tool not in {'BRIDGE', 'SPOT'}:
             R = self.radius
             n = self.hit_normal
             col = {'ERASE': (1.0, 0.3, 0.3), 'SELECT': (1.0, 0.6, 0.1), 'CLONE': (0.3, 0.9, 0.4),
@@ -708,12 +771,13 @@ class GSP_OT_brush(bpy.types.Operator):
                 if p.feather > 0:
                     view.draw_screen_ring(cx, cy, p.radius_px * (1 - p.feather), (1.0, 1.0, 1.0, 0.45))
                 return
-            if p.tool == 'BRIDGE':
+            if p.tool in {'BRIDGE', 'SPOT'}:
+                col = (0.3, 0.8, 1.0) if p.tool == 'BRIDGE' else (1.0, 0.35, 0.9)
                 if self.stroke is not None:
-                    view.draw_screen_discs(self.bridge_centres, p.radius_px, (0.3, 0.8, 1.0, 0.25))
-                view.draw_screen_ring(self.mouse[0], self.mouse[1], p.radius_px, (0.3, 0.8, 1.0, 0.9))
+                    view.draw_screen_discs(self.bridge_centres, p.radius_px, (*col, 0.25))
+                view.draw_screen_ring(self.mouse[0], self.mouse[1], p.radius_px, (*col, 0.9))
                 view.draw_screen_ring(self.mouse[0], self.mouse[1], p.radius_px * (1 + p.bridge_rim),
-                                      (0.3, 0.8, 1.0, 0.35))
+                                      (*col, 0.35))
                 return
             if self.hit is not None or p.tool not in PAINT_TOOLS | {'RESTORE'}:
                 return

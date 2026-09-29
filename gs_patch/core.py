@@ -716,10 +716,12 @@ def bridge_fill(S, ring, near, in_footprint, toward, edge=None, roughness=1.0, c
     surf = _Surface(pos, op, ring, toward, stiffness)
     grid = _Grid(np.stack([surf.u, surf.v], 1), 2.0 * spacing)
 
-    # Cells that already have surface on them: any splat close to the fitted height.
-    nu, nv, nh = surf.uvh(pos[near])
     mad = np.median(np.abs(surf.resid - np.median(surf.resid))) * 1.4826
     tol = max(2.0 * spacing, 3.0 * mad)
+    removed = 0
+
+    # Cells that already have surface on them: any splat close to the fitted height.
+    nu, nv, nh = surf.uvh(pos[near])
     on_surface = np.abs(nh - surf.height(nu, nv)) < tol
     occupied = grid.count(nu[on_surface], nv[on_surface]) > 0
     ring_cells = grid.count(surf.u, surf.v) > 0
@@ -728,12 +730,12 @@ def bridge_fill(S, ring, near, in_footprint, toward, edge=None, roughness=1.0, c
     cu, cv = grid.centres(all_ij).T
     painted = in_footprint(surf.point(cu, cv)).reshape(grid.dims)
     fill_ij = np.argwhere(painted & ~occupied)
-    if len(fill_ij) == 0:
-        return 0, 0, "The surface under the painted area is already covered"
     per_cell = len(ring) / max(np.count_nonzero(ring_cells), 1) * density
+    if len(fill_ij) == 0:
+        return removed, 0, "The surface under the painted area is already covered"
     src, overrides, msg = _populate(S, surf, grid, fill_ij, per_cell, np.zeros(S.n, bool), rng,
                                     source, None, roughness, color_smooth, heal, feather)
     if src is None:
-        return 0, 0, msg
+        return removed, 0, msg
     added = _append(S, src, overrides)
-    return 0, added, "Bridged from surroundings" if source is None else "Bridged from sample area"
+    return removed, added, "Bridged from surroundings" if source is None else "Bridged from sample area"
