@@ -1,0 +1,15 @@
+schema_version = "1.0.0"
+
+id = "gs_patch"
+version = "0.1.0"
+name = "Gaussian Splat Patch"
+tagline = "Erase, clone stamp and heal Gaussian splat point clouds"
+maintainer = "Tim Fennell"
+type = "add-on"
+
+blender_version_min = "5.3.0"
+
+license = ["SPDX:GPL-3.0-or-later"]
+
+[permissions]
+files = "Export edited splats to PLY files"

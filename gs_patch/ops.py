@@ -1,0 +1,552 @@
+import time
+
+import bpy
+import numpy as np
+from bpy_extras.io_utils import ExportHelper
+from mathutils import Vector
+
+from . import core, view
+from .splats import SplatSet, is_splat_object
+from .ply_io import write_splat_ply
+
+TOOL_ITEMS = [
+    ('ERASE', "Erase", "Paint to delete splats (dust, hairs, pins)", 'TRASH', 0),
+    ('SELECT', "Select", "Paint a region to erase or fill later (Ctrl: deselect)", 'RESTRICT_SELECT_OFF', 1),
+    ('CLONE', "Clone", "Clone stamp: Ctrl+click sets the sample point, then paint", 'BRUSH_CLONE', 2),
+    ('HEAL', "Heal", "Healing brush: clone, then match the colour of the destination", 'BRUSH_SOFTEN', 3),
+    ('SPOT', "Spot Heal", "Paint over a blemish; it is regrown from its surroundings", 'SHADERFX', 4),
+]
+
+_REV_KEY = "gsp_revision"
+
+# Whether a brush modal is running (module state, so a crash never leaves a stale flag in the file).
+STATE = {"running": False}
+
+HELP = {
+    'ERASE': "LMB paint erase",
+    'SELECT': "LMB select · Ctrl+LMB deselect",
+    'CLONE': "Ctrl+LMB set sample · LMB clone",
+    'HEAL': "Ctrl+LMB set sample · LMB heal",
+    'SPOT': "LMB paint over blemish",
+}
+
+
+def props_of(context):
+    return context.scene.gsp
+
+
+def bump_revision(obj):
+    rev = int(obj.data.get(_REV_KEY, 0)) + 1
+    obj.data[_REV_KEY] = rev
+    return rev
+
+
+def commit(context, obj, S, message):
+    """Write splats back and record an undo step."""
+    S.write(obj.data)
+    rev = bump_revision(obj)
+    obj.data.update_tag()
+    for area in context.screen.areas if context.screen else ():
+        if area.type == 'VIEW_3D':
+            area.tag_redraw()
+    bpy.ops.ed.undo_push(message=message)
+    return rev
+
+
+def active_splats(context):
+    obj = context.active_object
+    return obj if is_splat_object(obj) else None
+
+
+def _in_ui_region(area, x, y):
+    for r in area.regions:
+        if r.type in {'UI', 'TOOLS', 'HEADER', 'TOOL_HEADER', 'ASSET_SHELF', 'NAVIGATION_BAR'} \
+                and r.x <= x < r.x + r.width and r.y <= y < r.y + r.height and r.width > 1:
+            return True
+    return False
+
+
+# =====================================================================
+class GSP_OT_brush(bpy.types.Operator):
+    """Paint on the splats with the active tool. Esc or Enter to finish"""
+    bl_idname = "gsp.brush"
+    bl_label = "Splat Brush"
+    bl_options = {'REGISTER'}
+
+    tool: bpy.props.EnumProperty(items=TOOL_ITEMS + [('KEEP', "Current", "")], default='KEEP')
+
+    _handle = None
+
+    @classmethod
+    def poll(cls, context):
+        return context.area and context.area.type == 'VIEW_3D' and active_splats(context)
+
+    # ---------------------------------------------------------- setup
+    def invoke(self, context, event):
+        p = props_of(context)
+        if self.tool != 'KEEP':
+            p.tool = self.tool
+        if STATE["running"]:
+            return {'CANCELLED'}  # the running brush picks up the new tool
+        self.obj = context.active_object
+        self.area = context.area
+        self.region = next(r for r in context.area.regions if r.type == 'WINDOW')
+        self.rv3d = context.area.spaces.active.region_3d
+        self.load()
+        self.proj = view.Projection()
+        self.overlay = view.Overlay()
+        self.stroke = None
+        self.hit = None
+        self.hit_normal = None
+        self.last_dab = None
+        self.mouse = (0, 0)
+        self.offset = None          # clone: destination - source, in object space
+        self.stroke_src_start = None
+        self.last_draw = 0.0
+        self._handle = bpy.types.SpaceView3D.draw_handler_add(self.draw_overlay, (), 'WINDOW', 'POST_VIEW')
+        context.window_manager.modal_handler_add(self)
+        STATE["running"] = True
+        self.status(context)
+        return {'RUNNING_MODAL'}
+
+    def load(self):
+        self.S = core_S = SplatSet.read(self.obj.data)
+        self.rev = int(self.obj.data.get(_REV_KEY, 0))
+        self.ptr = self.obj.data.as_pointer()
+        return core_S
+
+    def status(self, context):
+        p = props_of(context)
+        context.workspace.status_text_set(
+            f"Splat {p.tool.title()}:  {HELP[p.tool]} · [ ] radius · Shift+[ ] feather · "
+            f"X surface/through · 1-5 tools · Esc/Enter done")
+
+    def finish(self, context):
+        if self._handle:
+            bpy.types.SpaceView3D.draw_handler_remove(self._handle, 'WINDOW')
+            self._handle = None
+        STATE["running"] = False
+        context.workspace.status_text_set(None)
+        self.area.tag_redraw()
+
+    # ---------------------------------------------------------- helpers
+    def stale(self):
+        d = self.obj.data
+        return (d.as_pointer() != self.ptr or int(d.get(_REV_KEY, 0)) != self.rev
+                or len(d.points) != self.S.n)
+
+    def mouse_local(self, event):
+        return event.mouse_x - self.region.x, event.mouse_y - self.region.y
+
+    def update_hit(self, context, mx, my):
+        p = props_of(context)
+        mw = self.obj.matrix_world
+        self.proj.update(self.region, self.rv3d, self.S, mw, self.rev)
+        hit = self.proj.pick(self.S, mx, my, p.radius_px)
+        if hit is None:
+            self.hit = None
+            return
+        self.view_dir = view.view_vector_local(self.region, self.rv3d, mx, my, mw)
+        self.radius = view.pixel_radius_to_local(self.region, self.rv3d, mx, my, p.radius_px, hit, mw)
+        self.hit = hit
+        # Normal estimates are cheap enough to track live on moderate clouds.
+        self.hit_anchor, self.hit_normal = core.surface_frame(self.S, hit, self.radius, self.view_dir)
+
+    def source_point(self, context):
+        p = props_of(context)
+        if not p.source_set:
+            return None
+        return np.array(self.obj.matrix_world.inverted() @ Vector(p.source_co), np.float32)
+
+    # ---------------------------------------------------------- dabs
+    def dab(self, context, mx, my, ctrl):
+        p = props_of(context)
+        st = self.stroke
+        S = self.S
+        R = self.radius
+        feather = p.feather
+        if p.tool in {'ERASE', 'SELECT', 'SPOT'}:
+            if p.depth_mode == 'THROUGH':
+                idx, dpx = self.proj.disc(mx, my, p.radius_px)
+                w = core.feather_weight(dpx, p.radius_px, feather)
+            else:
+                idx, w = core.sphere_hits(S.pos, self.hit, R, feather)
+            if p.tool == 'ERASE':
+                st.erase(idx, w, p.strength)
+            elif p.tool == 'SELECT':
+                st.mark_select(idx[w > 0.5] if feather > 0 else idx)
+            else:
+                st.mark_hole(idx[w > 0.5] if feather > 0 else idx)
+        else:
+            src = self.hit - self.offset
+            cs, ns = core.surface_frame(S, src, R, self.view_dir)
+            # Snap onto the surface under the offset source point.
+            cd, nd = self.hit_anchor, self.hit_normal
+            st.clone(cs, ns, cd, nd, R, feather, replace=p.replace,
+                     heal=p.heal_strength if p.tool == 'HEAL' else 0.0)
+            self.src_ring = (cs, ns)
+        self.last_dab = self.hit.copy()
+
+    # ---------------------------------------------------------- modal
+    def modal(self, context, event):
+        p = props_of(context)
+        if not STATE["running"] or context.active_object is not self.obj \
+                or not is_splat_object(self.obj):
+            self.finish(context)
+            return {'CANCELLED'}
+        if self.stroke is None and self.stale():
+            self.load()
+        self.area.tag_redraw()
+
+        x, y = event.mouse_x, event.mouse_y
+        inside = (self.region.x <= x < self.region.x + self.region.width
+                  and self.region.y <= y < self.region.y + self.region.height)
+        if self.stroke is None and (not inside or _in_ui_region(self.area, x, y)):
+            self.hit = None
+            return {'PASS_THROUGH'}
+
+        mx, my = self.mouse_local(event)
+        self.mouse = (mx, my)
+
+        if event.type in {'ESC', 'RET', 'NUMPAD_ENTER'} and event.value == 'PRESS':
+            if self.stroke is not None:
+                self.end_stroke(context)
+            self.finish(context)
+            return {'FINISHED'}
+
+        if event.value == 'PRESS' and self.stroke is None:
+            tools = {'ONE': 'ERASE', 'TWO': 'SELECT', 'THREE': 'CLONE', 'FOUR': 'HEAL', 'FIVE': 'SPOT'}
+            if event.type in tools:
+                p.tool = tools[event.type]
+                self.status(context)
+                return {'RUNNING_MODAL'}
+            if event.type in {'LEFT_BRACKET', 'RIGHT_BRACKET'}:
+                grow = 1.15 if event.type == 'RIGHT_BRACKET' else 1 / 1.15
+                if event.shift:
+                    p.feather = min(1.0, max(0.0, p.feather + (0.1 if grow > 1 else -0.1)))
+                else:
+                    p.radius_px = int(min(1000, max(3, round(p.radius_px * grow))))
+                self.update_hit(context, mx, my)
+                return {'RUNNING_MODAL'}
+            if event.type == 'X':
+                p.depth_mode = 'SURFACE' if p.depth_mode == 'THROUGH' else 'THROUGH'
+                return {'RUNNING_MODAL'}
+
+        if event.type == 'MOUSEMOVE':
+            self.update_hit(context, mx, my)
+            if self.stroke is not None and self.hit is not None:
+                spacing = max(self.radius * p.spacing, 1e-9)
+                if self.last_dab is None or np.linalg.norm(self.hit - self.last_dab) >= spacing:
+                    self.dab(context, mx, my, event.ctrl)
+            return {'RUNNING_MODAL'}
+
+        if event.type == 'LEFTMOUSE':
+            if event.value == 'PRESS':
+                self.update_hit(context, mx, my)
+                if self.hit is None:
+                    return {'RUNNING_MODAL'}
+                if p.tool in {'CLONE', 'HEAL'}:
+                    if event.ctrl or event.alt:
+                        p.source_co = self.obj.matrix_world @ Vector(self.hit_anchor)
+                        p.source_set = True
+                        self.offset = None
+                        return {'RUNNING_MODAL'}
+                    src = self.source_point(context)
+                    if src is None:
+                        self.report({'WARNING'}, "Ctrl+click a clean area first to set the sample point")
+                        return {'RUNNING_MODAL'}
+                    if self.offset is None or not p.aligned:
+                        self.offset = self.hit - src
+                self.stroke = core.Stroke(self.S)
+                self.stroke_ctrl = event.ctrl
+                self.last_dab = None
+                self.dab(context, mx, my, event.ctrl)
+                return {'RUNNING_MODAL'}
+            if event.value == 'RELEASE' and self.stroke is not None:
+                self.end_stroke(context)
+                return {'RUNNING_MODAL'}
+
+        if self.stroke is not None:
+            return {'RUNNING_MODAL'}
+        return {'PASS_THROUGH'}
+
+    def end_stroke(self, context):
+        p = props_of(context)
+        st, S = self.stroke, self.S
+        self.stroke = None
+        try:
+            if p.tool == 'SELECT':
+                if self.stroke_ctrl:
+                    S.selected[st.select] = False
+                else:
+                    S.selected[st.select] = True
+                self.rev = commit(context, self.obj, S, "Splat select")
+            elif p.tool == 'SPOT':
+                if not st.hole.any():
+                    return
+                removed, added, msg = core.heal_fill(
+                    S, st.hole, border=p.border_width, roughness=p.roughness,
+                    color_smooth=p.color_smooth, density=p.density, seed=int(time.time()))
+                self.report({'INFO'}, f"{msg}: -{removed} +{added}")
+                self.rev = commit(context, self.obj, S, "Splat spot heal")
+            else:
+                removed, added = st.commit_clones_and_erase(p.use_opacity_feather)
+                if removed or added:
+                    self.rev = commit(context, self.obj, S, f"Splat {p.tool.lower()}")
+        except Exception as ex:  # keep the modal alive and the data consistent
+            self.report({'ERROR'}, f"Stroke failed: {ex}")
+            self.load()
+            raise
+        self.ptr = self.obj.data.as_pointer()
+        self.proj.key = None
+
+    # ---------------------------------------------------------- drawing
+    def draw_overlay(self):
+        try:
+            self._draw()
+        except ReferenceError:
+            pass
+
+    def _draw(self):
+        area = bpy.context.area
+        if area is None or area.as_pointer() != self.area.as_pointer():
+            return
+        p = bpy.context.scene.gsp
+        ov = self.overlay
+        ov.clear()
+        ov.matrix = self.obj.matrix_world
+        S = self.S
+        st = self.stroke
+        tool = p.tool
+
+        # Selection
+        if p.show_selection and S.n:
+            sel = S.selected
+            if st is not None and tool == 'SELECT':
+                sel = (sel & ~st.select) if self.stroke_ctrl else (sel | st.select)
+            idx = np.nonzero(sel)[0]
+            if len(idx):
+                pos, rgba = view.cap(S.pos[idx], view.solid_rgba(1, (1.0, 0.55, 0.1, 0.9)))
+                ov.points.append((pos, np.broadcast_to(rgba[0], (len(pos), 4)).copy(), 2.0))
+
+        if st is not None:
+            if tool == 'ERASE':
+                idx = np.nonzero(st.factor < 0.999)[0]
+                if len(idx):
+                    a = 1.0 - st.factor[idx]
+                    rgba = np.column_stack([np.ones_like(a), 0.15 * np.ones_like(a),
+                                            0.15 * np.ones_like(a), 0.35 + 0.6 * a]).astype(np.float32)
+                    pos, rgba = view.cap(S.pos[idx], rgba)
+                    ov.points.append((pos, rgba, 2.0))
+            elif tool == 'SPOT':
+                idx = np.nonzero(st.hole)[0]
+                if len(idx):
+                    pos, rgba = view.cap(S.pos[idx], view.solid_rgba(len(idx), (1.0, 0.2, 0.8, 0.8)))
+                    ov.points.append((pos, rgba, 2.0))
+            elif tool in {'CLONE', 'HEAL'}:
+                pos, rgb = st.clone_preview()
+                if pos is not None:
+                    rgba = np.column_stack([rgb, np.full(len(rgb), 0.95)]).astype(np.float32)
+                    pos, rgba = view.cap(pos, rgba)
+                    ov.points.append((pos, rgba, 2.5))
+
+        if self.hit is not None:
+            R = self.radius
+            n = self.hit_normal
+            col = {'ERASE': (1.0, 0.3, 0.3), 'SELECT': (1.0, 0.6, 0.1), 'CLONE': (0.3, 0.9, 0.4),
+                   'HEAL': (0.3, 0.9, 0.8), 'SPOT': (1.0, 0.3, 0.9)}[tool]
+            if p.depth_mode == 'THROUGH' and tool in {'ERASE', 'SELECT', 'SPOT'}:
+                n = -self.view_dir
+            ov.rings.append((self.hit, n, R, (*col, 1.0), 2.0))
+            if p.feather > 0:
+                ov.rings.append((self.hit, n, R * (1 - p.feather), (*col, 0.45), 1.5))
+            if tool in {'CLONE', 'HEAL'} and p.source_set:
+                if self.offset is not None and p.aligned:
+                    src = self.hit - self.offset
+                else:
+                    src = self.source_point(bpy.context)
+                ov.rings.append((src, -self.view_dir, R, (0.3, 0.6, 1.0, 0.9), 2.0))
+                ov.rings.append((src, -self.view_dir, R * 0.08, (0.3, 0.6, 1.0, 0.9), 2.0))
+        elif tool in {'CLONE', 'HEAL'} and p.source_set:
+            src = self.source_point(bpy.context)
+            ov.rings.append((src, (0, 0, 1), 0.02, (0.3, 0.6, 1.0, 0.9), 2.0))
+        ov.draw()
+
+
+# =====================================================================
+class _SplatOp:
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return active_splats(context) is not None and not STATE["running"]
+
+
+class GSP_OT_select_all(_SplatOp, bpy.types.Operator):
+    """Select, deselect or invert the splat selection"""
+    bl_idname = "gsp.select_all"
+    bl_label = "Select All Splats"
+    action: bpy.props.EnumProperty(items=[('SELECT', "Select", ""), ('DESELECT', "Deselect", ""),
+                                          ('INVERT', "Invert", "")], default='DESELECT')
+
+    def execute(self, context):
+        obj = active_splats(context)
+        S = SplatSet.read(obj.data)
+        sel = S.selected
+        if self.action == 'SELECT':
+            sel[:] = True
+        elif self.action == 'DESELECT':
+            sel[:] = False
+        else:
+            sel[:] = ~sel
+        S.write(obj.data)
+        bump_revision(obj)
+        return {'FINISHED'}
+
+
+class GSP_OT_select_faint(_SplatOp, bpy.types.Operator):
+    """Add nearly transparent splats (haze, floaters) to the selection"""
+    bl_idname = "gsp.select_faint"
+    bl_label = "Select Faint Splats"
+    threshold: bpy.props.FloatProperty(name="Max Opacity", default=0.05, min=0.0, max=1.0)
+
+    def execute(self, context):
+        obj = active_splats(context)
+        S = SplatSet.read(obj.data)
+        m = S.opacity < self.threshold
+        S.selected[m] = True
+        S.write(obj.data)
+        bump_revision(obj)
+        self.report({'INFO'}, f"Selected {int(m.sum())} faint splats")
+        return {'FINISHED'}
+
+
+class GSP_OT_select_cursor_sphere(_SplatOp, bpy.types.Operator):
+    """Select splats inside a sphere around the 3D cursor"""
+    bl_idname = "gsp.select_cursor_sphere"
+    bl_label = "Select Around Cursor"
+
+    def execute(self, context):
+        obj = active_splats(context)
+        p = props_of(context)
+        S = SplatSet.read(obj.data)
+        c = np.array(obj.matrix_world.inverted() @ context.scene.cursor.location, np.float32)
+        scale = sum(abs(s) for s in obj.matrix_world.to_scale()) / 3.0
+        m = np.linalg.norm(S.pos - c, axis=1) < p.cursor_radius / max(scale, 1e-12)
+        S.selected[m] = True
+        S.write(obj.data)
+        bump_revision(obj)
+        self.report({'INFO'}, f"Selected {int(m.sum())} splats")
+        return {'FINISHED'}
+
+
+class GSP_OT_delete_selected(_SplatOp, bpy.types.Operator):
+    """Delete the selected splats"""
+    bl_idname = "gsp.delete_selected"
+    bl_label = "Delete Selected Splats"
+
+    def execute(self, context):
+        obj = active_splats(context)
+        S = SplatSet.read(obj.data)
+        m = S.selected.copy()
+        if not m.any():
+            self.report({'WARNING'}, "No splats selected")
+            return {'CANCELLED'}
+        S.keep(~m)
+        S.write(obj.data)
+        bump_revision(obj)
+        self.report({'INFO'}, f"Deleted {int(m.sum())} splats")
+        return {'FINISHED'}
+
+
+class GSP_OT_fill_selected(_SplatOp, bpy.types.Operator):
+    """Delete the selected splats and regrow the surface across the gap"""
+    bl_idname = "gsp.fill_selected"
+    bl_label = "Fill Selection"
+    method: bpy.props.EnumProperty(items=[
+        ('SURROUND', "From Surroundings", "Grow new splats from the border around the gap"),
+        ('SOURCE', "From Sample", "Clone the sample area into the gap and match its colour"),
+    ], default='SURROUND')
+
+    def execute(self, context):
+        obj = active_splats(context)
+        p = props_of(context)
+        S = SplatSet.read(obj.data)
+        hole = S.selected.copy()
+        source = None
+        if self.method == 'SOURCE':
+            if not p.source_set:
+                self.report({'ERROR'}, "Set a sample point first (Ctrl+click with Clone, or from the 3D cursor)")
+                return {'CANCELLED'}
+            source = np.array(obj.matrix_world.inverted() @ Vector(p.source_co), np.float32)
+        removed, added, msg = core.heal_fill(
+            S, hole, border=p.border_width, roughness=p.roughness, color_smooth=p.color_smooth,
+            density=p.density, source=source, heal=p.heal_strength, feather=p.feather,
+            seed=int(time.time()))
+        if removed == 0 and added == 0:
+            self.report({'WARNING'}, msg)
+            return {'CANCELLED'}
+        S.write(obj.data)
+        bump_revision(obj)
+        self.report({'INFO'}, f"{msg}: removed {removed}, added {added}")
+        return {'FINISHED'}
+
+
+class GSP_OT_source_from_cursor(bpy.types.Operator):
+    """Use the 3D cursor as the clone/heal sample point"""
+    bl_idname = "gsp.source_from_cursor"
+    bl_label = "Sample From 3D Cursor"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        p = props_of(context)
+        p.source_co = context.scene.cursor.location
+        p.source_set = True
+        return {'FINISHED'}
+
+
+class GSP_OT_export_ply(bpy.types.Operator, ExportHelper):
+    """Save the active splat object as a standard 3D Gaussian splat PLY"""
+    bl_idname = "gsp.export_ply"
+    bl_label = "Export Splat PLY"
+    filename_ext = ".ply"
+    filter_glob: bpy.props.StringProperty(default="*.ply", options={'HIDDEN'})
+
+    @classmethod
+    def poll(cls, context):
+        return active_splats(context) is not None
+
+    def invoke(self, context, event):
+        obj = active_splats(context)
+        if not self.filepath:
+            self.filepath = bpy.path.clean_name(obj.name) + "_patched.ply"
+        return ExportHelper.invoke(self, context, event)
+
+    def execute(self, context):
+        obj = active_splats(context)
+        n = write_splat_ply(self.filepath, SplatSet.read(obj.data))
+        self.report({'INFO'}, f"Wrote {n} splats to {self.filepath}")
+        return {'FINISHED'}
+
+
+class GSP_OT_stop_brush(bpy.types.Operator):
+    """Leave the splat brush"""
+    bl_idname = "gsp.stop_brush"
+    bl_label = "Stop Brush"
+
+    def execute(self, context):
+        STATE["running"] = False
+        return {'FINISHED'}
+
+
+classes = (
+    GSP_OT_brush,
+    GSP_OT_select_all,
+    GSP_OT_select_faint,
+    GSP_OT_select_cursor_sphere,
+    GSP_OT_delete_selected,
+    GSP_OT_fill_selected,
+    GSP_OT_source_from_cursor,
+    GSP_OT_export_ply,
+    GSP_OT_stop_brush,
+)
