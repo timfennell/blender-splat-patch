@@ -97,6 +97,42 @@ Strokes don't create Blender undo steps (on big scans each would copy the whole 
   Anything deeper in the hole is left alone and ends up behind the new surface. Clone and Heal then work on
   top of the bridge. *Rim Width* sets how wide a ring is read, as a multiple of the brush radius.
 
+## Bridge workflow: filling the hole a pin leaves
+
+Bridge is for a hole that is already **empty**, like the one left after erasing a pin. It reads the intact
+surface in a ring around the area you paint, fits a smooth surface across the gap, and grows new splats on
+it, continuing the fuzz or shell from the edge of the hole.
+
+**1. The pin.** The specimen as scanned, with the pin going into the top of the thorax.
+
+![The pin entering the thorax](docs/images/bridge_1_pin.jpg)
+
+**2. Erase the pin.** Erase it in **Through** mode, then **Select Floaters** and **Delete Selected Splats**
+to clear the stray bits. That leaves a dark hole (circled) where you can see into the body.
+
+![After erasing the pin: a dark hole in the surface](docs/images/bridge_2_hole.jpg)
+
+**3. Paint over the hole with Bridge.** Turn the view so you're looking fairly straight into the hole. Press
+**B** (or click **Bridge**) and press **F** to size the brush a little bigger than the hole. The solid ring is
+the brush; the fainter outer ring is how much surrounding surface it will read (*Rim Width*). Drag over the
+hole: the area you paint shows as a blue fill. Nothing changes until you let go.
+
+![Painting over the hole with the Bridge brush](docs/images/bridge_3_paint.jpg)
+
+**4. Let go.** The hole is covered with new splats grown from its rim, level with the surrounding surface.
+The status bar reports how many were added (417 here). Anything deeper in the hole is left alone, now hidden
+behind the new surface.
+
+![After Bridge: the hole covered, continuing the surrounding fuzz](docs/images/bridge_4_result.jpg)
+
+**Tips**
+- *Fill With: Sample* clones the area around your sample point (Ctrl+click with Clone first) onto the
+  bridge instead, colour-matched to the rim. Use it when the surroundings are too plain or too patchy.
+- Where the area was very hairy, the bridge can look smoother than its surroundings. A few light Clone
+  strokes from a nearby hairy patch on top blend it in.
+- If the bridge looks wrong, press **R** (Restore) and paint over it: only the bridge's splats are removed,
+  and you can try again from a straighter view.
+
 ## Restore (non-destructive edits)
 
 Edits are recorded, so any part of the model can be taken back to the original scan:
