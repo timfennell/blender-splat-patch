@@ -104,10 +104,18 @@ the original file exactly. Positions are written in object space (the object tra
 
 ## Limits
 
-- Large scans: on a 2-million-splat scan, starting the brush takes about a second, hovering and dabs a
-  few milliseconds, and erase/select/restore strokes under 0.1 s. Strokes that add splats (Clone, Heal,
-  Spot Heal, Bridge) take about 0.7 s, because Blender has to rewrite the whole cloud when it grows.
-- Erased splats stay in the .blend (hidden) so they can be restored, until you export.
+- **Built against the Blender 5.3 alpha.** The tool relies on how 5.3 stores splats (attributes such as
+  `radiance:base`). If that changes before the final release, the tool will need an update.
+- **Large scans:** on a 2-million-splat scan, starting the brush takes about 1¼ s, hovering and dabs a few
+  milliseconds, and erase/select/restore strokes under 0.1 s. Strokes that add splats (Clone, Heal,
+  Spot Heal, Bridge) take about 0.6 s, because Blender has to rewrite the whole cloud when it grows.
+- **Erased splats stay in the .blend.** They're hidden, not deleted, so they can be restored; the file
+  keeps its full size while you edit. Export Splat PLY leaves them out of the exported file.
+- **Bridge rebuilds one surface layer.** Where the gap was thick with hair, the bridged patch can look
+  smoother than its surroundings; a pass of Clone or Heal from a hairy area on top blends it in.
+- **Restore only knows edits made with version 0.1.3 or later.** Earlier edits are permanent.
+- **Tested on insect scans from Brush.** Scans from other trainers should work, since the PLY layout is
+  standard, but haven't been tried.
 
 ## Development
 
