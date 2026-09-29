@@ -15,6 +15,7 @@ TOOL_ITEMS = [
     ('CLONE', "Clone", "Clone stamp: Ctrl+click sets the sample point, then paint", 'DUPLICATE', 2),
     ('HEAL', "Heal", "Healing brush: clone, then match the colour of the destination", 'MOD_SMOOTH', 3),
     ('SPOT', "Spot Heal", "Paint over a blemish; it is regrown from its surroundings", 'SHADERFX', 4),
+    ('BRIDGE', "Bridge", "Paint over an empty hole to continue the surface across it", 'MOD_SOLIDIFY', 5),
 ]
 
 _REV_KEY = "gsp_revision"
@@ -23,8 +24,11 @@ _REV_KEY = "gsp_revision"
 STATE = {"running": False}
 
 PAINT_TOOLS = {'ERASE', 'SELECT', 'SPOT'}
+# Tools that can start and continue a stroke with nothing solid under the mouse.
+FREE_TOOLS = PAINT_TOOLS | {'BRIDGE'}
 
 HELP = {
+    'BRIDGE': "LMB paint over the hole, a little onto the intact surface around it",
     'ERASE': "LMB paint erase",
     'SELECT': "LMB select · Ctrl+LMB deselect",
     'CLONE': "Ctrl+LMB set sample · LMB clone",
@@ -129,7 +133,7 @@ class GSP_OT_brush(bpy.types.Operator):
         p = props_of(context)
         context.workspace.status_text_set(
             f"Splat {p.tool.title()}:  {HELP[p.tool]} · [ ] radius · Shift+[ ] feather · "
-            f"X surface/through · 1-5 tools · Esc/Enter done")
+            f"X surface/through · 1-6 tools · Esc/Enter done")
 
     def finish(self, context):
         if self._handle:
@@ -182,7 +186,9 @@ class GSP_OT_brush(bpy.types.Operator):
         S = self.S
         R = self.radius
         feather = p.feather
-        if p.tool in PAINT_TOOLS:
+        if p.tool == 'BRIDGE':
+            self.bridge_centres.append((mx, my))
+        elif p.tool in PAINT_TOOLS:
             # Through mode, or nothing solid under the mouse (wisps in empty space):
             # take everything under the brush circle at any depth.
             if p.depth_mode == 'THROUGH' or self.hit is None:
@@ -238,7 +244,8 @@ class GSP_OT_brush(bpy.types.Operator):
             return {'FINISHED'}
 
         if event.value == 'PRESS' and self.stroke is None:
-            tools = {'ONE': 'ERASE', 'TWO': 'SELECT', 'THREE': 'CLONE', 'FOUR': 'HEAL', 'FIVE': 'SPOT'}
+            tools = {'ONE': 'ERASE', 'TWO': 'SELECT', 'THREE': 'CLONE', 'FOUR': 'HEAL', 'FIVE': 'SPOT',
+                     'SIX': 'BRIDGE'}
             if event.type in tools:
                 p.tool = tools[event.type]
                 self.status(context)
@@ -257,7 +264,7 @@ class GSP_OT_brush(bpy.types.Operator):
 
         if event.type == 'MOUSEMOVE':
             self.update_hit(context, mx, my)
-            if self.stroke is not None and (self.hit is not None or p.tool in PAINT_TOOLS):
+            if self.stroke is not None and (self.hit is not None or p.tool in FREE_TOOLS):
                 spacing = max(p.radius_px * p.spacing, 1.0)
                 if self.last_dab is None or np.hypot(mx - self.last_dab[0], my - self.last_dab[1]) >= spacing:
                     self.dab(context, mx, my, event.ctrl)
@@ -266,7 +273,7 @@ class GSP_OT_brush(bpy.types.Operator):
         if event.type == 'LEFTMOUSE':
             if event.value == 'PRESS':
                 self.update_hit(context, mx, my)
-                if self.hit is None and p.tool not in PAINT_TOOLS:
+                if self.hit is None and p.tool not in FREE_TOOLS:
                     return {'RUNNING_MODAL'}
                 if p.tool in {'CLONE', 'HEAL'}:
                     if event.ctrl or event.alt:
@@ -281,6 +288,7 @@ class GSP_OT_brush(bpy.types.Operator):
                     if self.offset is None or not p.aligned:
                         self.offset = self.hit - src
                 self.stroke = core.Stroke(self.S)
+                self.bridge_centres = []
                 self.stroke_ctrl = event.ctrl
                 self.last_dab = None
                 self.dab(context, mx, my, event.ctrl)
@@ -304,6 +312,8 @@ class GSP_OT_brush(bpy.types.Operator):
                 else:
                     S.selected[st.select] = True
                 self.rev = commit(context, self.obj, S, "Splat select")
+            elif p.tool == 'BRIDGE':
+                self.end_bridge(context)
             elif p.tool == 'SPOT':
                 if not st.hole.any():
                     return
@@ -323,6 +333,96 @@ class GSP_OT_brush(bpy.types.Operator):
         self.ptr = self.obj.data.as_pointer()
         self.axes = major_axes(self.S)
         self.proj.key = None
+
+    def end_bridge(self, context):
+        """Fit the intact surface around the painted hole and grow splats across it."""
+        p = props_of(context)
+        S, proj, r = self.S, self.proj, float(p.radius_px)
+        if not self.bridge_centres:
+            return
+        mw = self.obj.matrix_world
+        proj.update(self.region, self.rv3d, S, mw, self.rev, self.axes)
+        fp = view.Footprint(self.bridge_centres, r, self.region.width, self.region.height)
+        inner = fp.mask(radius_px=r)
+        outer = fp.mask(radius_px=r, extra_px=r * p.bridge_rim)
+        in_inner = fp.lookup(inner, proj.sx, proj.sy, proj.ok)
+        in_outer = fp.lookup(outer, proj.sx, proj.sy, proj.ok)
+
+        # Rim = the front layer of splats in the band around the painted area. Splats
+        # further back (the far wall of the hole, the other side of the body) are not rim.
+        band = np.nonzero(in_outer & ~in_inner & (S.opacity > 0.1))[0]
+        if len(band) < 12:
+            self.report({'WARNING'}, "No intact surface around the painted area; paint onto its edge")
+            return
+        ix = np.floor(proj.sx[band] / fp.cell).astype(int)
+        iy = np.floor(proj.sy[band] / fp.cell).astype(int)
+        cid = ix * fp.gh + iy
+        depth = proj.depth[band]
+        solid = S.opacity[band] > 0.3
+        if solid.sum() < 12:
+            solid = np.ones(len(band), bool)
+        # Nearest opaque splat per screen cell; cells with only faint splats (hair) use
+        # their nearest splat of any opacity, so nothing behind them counts as rim.
+        front = np.full(fp.gw * fp.gh, np.inf)
+        np.minimum.at(front, cid[solid], depth[solid])
+        any_front = np.full(fp.gw * fp.gh, np.inf)
+        np.minimum.at(any_front, cid, depth)
+        front = np.where(np.isfinite(front), front, any_front)
+        first = band[depth <= front[cid] * 1.0001]
+        cx, cy = np.mean(self.bridge_centres, axis=0)
+        anchor = np.median(S.pos[first], axis=0) if len(first) else S.pos[band].mean(0)
+        R = view.pixel_radius_to_local(self.region, self.rv3d, cx, cy, r, anchor, mw)
+        in_front = depth <= front[cid] + 0.5 * R
+        ring = band[in_front]
+        # Screen distance of each rim splat outside the painted area; the closest ones
+        # are the hole's edge.
+        centres = np.asarray(self.bridge_centres, np.float32)
+        gap = np.full(len(ring), np.inf, np.float32)
+        for x0, y0 in centres:
+            gap = np.minimum(gap, np.hypot(proj.sx[ring] - x0, proj.sy[ring] - y0) - r)
+        at_edge = gap < 0.35 * r * p.bridge_rim
+        # Keep one layer: model the edge's view depth as a plane over the screen, fitted
+        # robustly (starting from the median, then MAD rejection), and drop rim splats off
+        # it. Near an outline the band can see things far behind; those go here.
+        rsx, rsy, rdep = proj.sx[ring], proj.sy[ring], proj.depth[ring]
+        X = np.stack([rsx - cx, rsy - cy, np.ones(len(ring))], 1)
+        m = at_edge.copy()
+        if m.sum() >= 12:
+            res = rdep - np.median(rdep[m])
+            for _ in range(5):
+                mad = np.median(np.abs(res[m])) * 1.4826 + 1e-9
+                m = at_edge & (np.abs(res) < 3.5 * mad)
+                if m.sum() < 12:
+                    break
+                coef, *_ = np.linalg.lstsq(X[m], rdep[m], rcond=None)
+                res = rdep - X @ coef
+            mad = np.median(np.abs(res[m])) * 1.4826 + 1e-9 if m.sum() else np.inf
+            layer = np.abs(res) < max(4.0 * mad, 0.05 * R)
+            if layer.sum() >= 12:
+                ring, at_edge = ring[layer], at_edge[layer]
+        edge = ring[at_edge]
+        near = np.nonzero(in_outer)[0]
+        toward = -view.view_vector_local(self.region, self.rv3d, cx, cy, mw)
+
+        def in_footprint(pts):
+            return fp.lookup(inner, *proj.project(pts))
+
+        source = None
+        if p.bridge_source == 'SAMPLE':
+            if not p.source_set:
+                self.report({'ERROR'}, "Set a sample point first (Ctrl+click with Clone/Heal, or from the 3D cursor)")
+                return
+            source = self.source_point(context)
+        removed, added, msg = core.bridge_fill(
+            S, ring, near, in_footprint, toward, edge=edge, roughness=p.roughness, color_smooth=p.color_smooth,
+            density=p.density, source=source, heal=p.heal_strength, feather=p.feather,
+            seed=int(time.time()))
+        self.last_bridge = (len(ring), added, msg)
+        if added == 0:
+            self.report({'WARNING'}, msg)
+            return
+        self.report({'INFO'}, f"{msg}: +{added} splats")
+        self.rev = commit(context, self.obj, S, "Splat bridge")
 
     # ---------------------------------------------------------- drawing
     def draw_overlay(self):
@@ -371,7 +471,7 @@ class GSP_OT_brush(bpy.types.Operator):
                     pos, rgba = view.cap(pos, rgba)
                     ov.points.append((pos, rgba, 2.5))
 
-        if self.hit is not None:
+        if self.hit is not None and tool != 'BRIDGE':
             R = self.radius
             n = self.hit_normal
             col = {'ERASE': (1.0, 0.3, 0.3), 'SELECT': (1.0, 0.6, 0.1), 'CLONE': (0.3, 0.9, 0.4),
@@ -398,10 +498,17 @@ class GSP_OT_brush(bpy.types.Operator):
         # still visible (and usable) over wisps in empty space.
         try:
             area = bpy.context.area
-            if area is None or area.as_pointer() != self.area.as_pointer() or self.hit is not None:
+            if area is None or area.as_pointer() != self.area.as_pointer():
                 return
             p = bpy.context.scene.gsp
-            if p.tool not in PAINT_TOOLS:
+            if p.tool == 'BRIDGE':
+                if self.stroke is not None:
+                    view.draw_screen_discs(self.bridge_centres, p.radius_px, (0.3, 0.8, 1.0, 0.25))
+                view.draw_screen_ring(self.mouse[0], self.mouse[1], p.radius_px, (0.3, 0.8, 1.0, 0.9))
+                view.draw_screen_ring(self.mouse[0], self.mouse[1], p.radius_px * (1 + p.bridge_rim),
+                                      (0.3, 0.8, 1.0, 0.35))
+                return
+            if self.hit is not None or p.tool not in PAINT_TOOLS:
                 return
             view.draw_screen_ring(self.mouse[0], self.mouse[1], p.radius_px, (1.0, 1.0, 1.0, 0.7))
             if p.feather > 0:

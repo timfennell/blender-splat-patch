@@ -25,13 +25,8 @@ class Projection:
         P = np.array(rv3d.perspective_matrix @ matrix_world, np.float32)
         V = np.array(rv3d.view_matrix @ matrix_world, np.float32)
 
-        def project(pts):
-            clip = pts @ P[:, :3].T + P[:, 3]
-            w = clip[:, 3]
-            ok = w > 1e-6
-            w = np.where(ok, w, 1.0)
-            return ((clip[:, 0] / w * 0.5 + 0.5) * region.width,
-                    (clip[:, 1] / w * 0.5 + 0.5) * region.height, ok)
+        self.P, self.width, self.height = P, region.width, region.height
+        project = self.project
 
         pos = S.pos
         self.sx, self.sy, self.ok = project(pos)
@@ -43,6 +38,16 @@ class Projection:
             self.ax = np.where(ok_e, ex - self.sx, 0.0)
             self.ay = np.where(ok_e, ey - self.sy, 0.0)
             self.reach = np.hypot(self.ax, self.ay)
+
+    def project(self, pts):
+        """Screen x, y and in-front flag for object-space points, with the cached view."""
+        P = self.P
+        clip = pts @ P[:, :3].T + P[:, 3]
+        w = clip[:, 3]
+        ok = w > 1e-6
+        w = np.where(ok, w, 1.0)
+        return ((clip[:, 0] / w * 0.5 + 0.5) * self.width,
+                (clip[:, 1] / w * 0.5 + 0.5) * self.height, ok)
 
     def disc(self, mx, my, radius_px, extents=False):
         """Splats under a screen disc. With extents, any part of a splat's long axis counts."""
@@ -164,6 +169,53 @@ def draw_screen_ring(x, y, radius_px, color, width=1.5):
     gpu.state.blend_set('ALPHA')
     draw_lines([[(px, py, 0.0) for px, py in pts]], color, width)
     gpu.state.blend_set('NONE')
+
+
+def draw_screen_discs(centres, radius_px, color, segments=24):
+    """Filled translucent circles in region pixel space (the painted bridge footprint)."""
+    if not centres:
+        return
+    ang = [2 * math.pi * i / segments for i in range(segments + 1)]
+    tris = []
+    for x, y in centres:
+        ring = [(x + radius_px * math.cos(a), y + radius_px * math.sin(a), 0.0) for a in ang]
+        for p, q in zip(ring[:-1], ring[1:]):
+            tris += [(x, y, 0.0), p, q]
+    shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+    batch = batch_for_shader(shader, 'TRIS', {"pos": tris})
+    gpu.state.blend_set('ALPHA')
+    shader.bind()
+    shader.uniform_float("color", color)
+    batch.draw(shader)
+    gpu.state.blend_set('NONE')
+
+
+class Footprint:
+    """Union of painted screen discs, rasterised so points can be tested against it."""
+
+    def __init__(self, centres, radius_px, width, height):
+        self.cell = max(2.0, radius_px / 8.0)
+        self.gw = int(width / self.cell) + 1
+        self.gh = int(height / self.cell) + 1
+        gx = (np.arange(self.gw) + 0.5) * self.cell
+        gy = (np.arange(self.gh) + 0.5) * self.cell
+        self.X, self.Y = np.meshgrid(gx, gy, indexing='ij')
+        self.centres = np.asarray(centres, np.float32)
+
+    def mask(self, extra_px=0.0, radius_px=0.0):
+        m = np.zeros((self.gw, self.gh), bool)
+        r2 = (radius_px + extra_px) ** 2
+        for x, y in self.centres:
+            m |= (self.X - x) ** 2 + (self.Y - y) ** 2 <= r2
+        return m
+
+    def lookup(self, m, sx, sy, ok):
+        ix = np.floor(sx / self.cell).astype(int)
+        iy = np.floor(sy / self.cell).astype(int)
+        inside = ok & (ix >= 0) & (iy >= 0) & (ix < self.gw) & (iy < self.gh)
+        out = np.zeros(len(sx), bool)
+        out[inside] = m[ix[inside], iy[inside]]
+        return out
 
 
 class Overlay:

@@ -40,6 +40,13 @@ class GSP_Props(bpy.types.PropertyGroup):
                                      description="Regrown splat density relative to the surroundings")
     cursor_radius: bpy.props.FloatProperty(name="Radius", default=0.1, min=0.0, unit='LENGTH')
     show_selection: bpy.props.BoolProperty(name="Show Selection", default=True)
+    bridge_source: bpy.props.EnumProperty(name="Fill With", items=[
+        ('SURROUND', "Surroundings", "Grow the bridge from the rim around the hole"),
+        ('SAMPLE', "Sample", "Clone the area around the sample point onto the bridge, colour-matched to the rim"),
+    ], default='SURROUND')
+    bridge_rim: bpy.props.FloatProperty(
+        name="Rim Width", default=1.0, min=0.2, max=4.0,
+        description="How far around the painted area to read the intact surface, as a multiple of the brush radius")
     floater_gap: bpy.props.FloatProperty(
         name="Gap", default=0.0, min=0.0, unit='LENGTH',
         description="Splats separated from the specimen by more than this count as floaters (0 = automatic)")
@@ -100,6 +107,11 @@ class GSP_PT_brush(bpy.types.Panel):
         col.prop(p, "spacing")
         if p.tool in {'ERASE', 'SELECT', 'SPOT'}:
             col.prop(p, "depth_mode", expand=True)
+        if p.tool == 'BRIDGE':
+            col.prop(p, "bridge_source", expand=True)
+            col.prop(p, "bridge_rim")
+            if p.bridge_source == 'SAMPLE':
+                col.prop(p, "heal_strength", slider=True)
         if p.tool == 'ERASE':
             col.prop(p, "strength", slider=True)
         if p.tool in {'CLONE', 'HEAL'}:

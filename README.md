@@ -22,7 +22,7 @@ Pick a tool button to start painting. While the brush is running:
 | Ctrl+LMB | Clone/Heal: set the sample point · Select: deselect |
 | `[` `]` | brush radius · Shift: feather |
 | `X` | Surface ↔ Through depth (Through reaches every depth, e.g. a whole pin) |
-| `1`–`5` | Erase / Select / Clone / Heal / Spot Heal |
+| `1`–`6` | Erase / Select / Clone / Heal / Spot Heal / Bridge |
 | Esc / Enter | stop the brush |
 
 MMB, the scroll wheel and trackpad gestures still navigate the view. Each stroke is one undo step.
@@ -38,6 +38,13 @@ MMB, the scroll wheel and trackpad gestures still navigate the view. Each stroke
   *Replace Destination* removes what was there, crossfading across the feather.
 - **Heal**: clones like Clone, then shifts the colour to match the ring around the destination.
 - **Spot Heal**: paint over a speck; it is deleted and new splats are grown from the surrounding surface.
+- **Bridge**: for a hole that is already empty (e.g. after erasing a pin). Look at the hole and paint over
+  it, a little onto the intact surface around it. The tool reads the surface in a rim around what you
+  painted, keeping only the layer at the hole's edge (not the inside of the hole, or a leg or wing crossing
+  the rim). It fits a gently curved surface across the gap and covers it with splats, either grown from
+  the rim (*Fill With: Surroundings*) or cloned from the sample point and colour-matched (*Sample*).
+  Anything deeper in the hole is left alone and ends up behind the new surface. Clone and Heal then work on
+  top of the bridge. *Rim Width* sets how wide a ring is read, as a multiple of the brush radius.
 
 ## Selection & Fill (the sample / edit / fill volumes)
 

@@ -393,6 +393,175 @@ def _quad_design(u, v):
     return np.stack([np.ones_like(u), u, v, u * u, u * v, v * v], axis=1)
 
 
+class _Surface:
+    """Quadratic height field h(u, v) fitted to a ring of splats, in a tangent frame."""
+
+    def __init__(self, pos, op, ring, toward=None, stiffness=0.0):
+        c, e1, e2, n, inl = fit_frame(pos[ring], np.clip(op[ring], 0.05, 1.0))
+        if toward is not None and np.dot(n, toward) < 0:
+            n, e2 = -n, -e2
+        self.c, self.e1, self.e2, self.n = c, e1, e2, n
+        rel = pos[ring] - c
+        self.u, self.v, h = rel @ e1, rel @ e2, rel @ n
+        A = _quad_design(self.u, self.v)
+        fit_m = inl & (op[ring] > 0.2)
+        if np.count_nonzero(fit_m) < 6:
+            fit_m = inl
+        if stiffness > 0:
+            # Ridge on the curvature terms, scaled to the ring's size, so an uneven rim
+            # can't make the surface bulge or dive across the gap it has no data for.
+            L2 = max(float(np.percentile(self.u ** 2 + self.v ** 2, 90)), 1e-12)
+            Af, hf = A[fit_m], h[fit_m]
+            reg = np.diag([0, 0, 0, 1, 1, 1]) * stiffness * len(hf) * L2 * L2
+            self.coef = np.linalg.solve(Af.T @ Af + reg, Af.T @ hf)
+        else:
+            self.coef, *_ = np.linalg.lstsq(A[fit_m], h[fit_m], rcond=None)
+        self.resid = h - A @ self.coef
+        self.ring = ring
+
+    def uvh(self, pts):
+        rel = pts - self.c
+        return rel @ self.e1, rel @ self.e2, rel @ self.n
+
+    def height(self, uu, vv):
+        return _quad_design(uu, vv) @ self.coef
+
+    def point(self, uu, vv, extra=0.0):
+        hh = self.height(uu, vv) + extra
+        return (self.c + uu[:, None] * self.e1 + vv[:, None] * self.e2 + hh[:, None] * self.n).astype(np.float32)
+
+    def normal(self, uu, vv):
+        coef, n, e1, e2 = self.coef, self.n, self.e1, self.e2
+        du = coef[1] + 2 * coef[3] * uu + coef[4] * vv
+        dv = coef[2] + coef[4] * uu + 2 * coef[5] * vv
+        nn = n[None, :] - du[:, None] * e1[None, :] - dv[:, None] * e2[None, :]
+        return nn / np.linalg.norm(nn, axis=1, keepdims=True)
+
+
+class _Grid:
+    def __init__(self, uv_points, cell, margin_cells=2, max_dim=600):
+        lo = uv_points.min(0) - margin_cells * cell
+        hi = uv_points.max(0) + margin_cells * cell
+        cell = float(max(cell, (hi - lo).max() / max_dim))
+        self.gmin, self.cell = lo, cell
+        self.dims = np.ceil((hi - lo) / cell).astype(int) + 1
+
+    def ij(self, uu, vv):
+        ij = np.floor((np.stack([uu, vv], 1) - self.gmin) / self.cell).astype(int)
+        return np.clip(ij, 0, self.dims - 1)
+
+    def count(self, uu, vv):
+        occ = np.zeros(self.dims, np.int32)
+        ij = self.ij(uu, vv)
+        np.add.at(occ, (ij[:, 0], ij[:, 1]), 1)
+        return occ
+
+    def centres(self, ij):
+        return self.gmin + (ij + 0.5) * self.cell
+
+
+def _spacing(pos, idx, sample=None):
+    """Median nearest-neighbour distance among splats idx (measured on `sample` of them)."""
+    kd = _kdtree(pos[idx])
+    probe = idx if sample is None else sample
+    return float(np.median([kd.find_n(p, 2)[1][2] for p in pos[probe]])) + 1e-9
+
+
+def _populate(S, surf, grid, fill_ij, per_cell, exclude, rng, source=None, source_normal_hint=None,
+              roughness=1.0, color_smooth=0.5, heal=1.0, feather=0.3):
+    """New splats covering grid cells fill_ij of the surface. Returns (src, overrides, msg) or (None, None, msg)."""
+    pos, op, base = S.pos, S.opacity, S.base
+    ring, cell = surf.ring, grid.cell
+    overrides = {}
+    if source is None:
+        # ---- grow from the ring: copy nearby rim splats onto the surface, keeping their grain
+        counts = rng.poisson(per_cell, len(fill_ij))
+        cells = np.repeat(fill_ij, counts, axis=0)
+        m = len(cells)
+        if m == 0:
+            return None, None, "Border too sparse to regrow"
+        uvn = grid.gmin + (cells + rng.random((m, 2))) * cell
+        kd_uv = KDTree(len(ring))
+        for i, (a, bb) in enumerate(zip(surf.u, surf.v)):
+            kd_uv.insert((a, bb, 0.0), i)
+        kd_uv.balance()
+        k = min(10, len(ring))
+        donor = np.empty(m, np.int64)
+        mean_dc = np.zeros((m, 3), np.float32)
+        for j, (a, bb) in enumerate(uvn):
+            nb = kd_uv.find_n((a, bb, 0.0), k)
+            ids = np.array([x[1] for x in nb])
+            wts = 1.0 / (np.array([x[2] for x in nb]) + 1e-9)
+            wts /= wts.sum()
+            donor[j] = ids[rng.choice(len(ids), p=wts)]
+            if base is not None:
+                mean_dc[j] = (base[ring[ids], :3] * wts[:, None]).sum(0)
+        src = ring[donor]
+        overrides["position"] = surf.point(uvn[:, 0], uvn[:, 1], roughness * surf.resid[donor])
+        if base is not None:
+            nb_ = base[src].copy()
+            nb_[:, :3] = (1 - color_smooth) * nb_[:, :3] + color_smooth * mean_dc
+            overrides[BASE_ATTR] = nb_
+        return src, overrides, "Grown from surroundings"
+
+    # ---- clone from a sample area onto the surface, tone-matched to the ring
+    src_pt = np.asarray(source, np.float32)
+    fill_uv = grid.centres(fill_ij)
+    u0, v0 = fill_uv.mean(0)
+    cd = surf.point(np.array([u0]), np.array([v0]))[0]
+    nd = surf.normal(np.array([u0]), np.array([v0]))[0]
+    reach = float(np.linalg.norm(fill_uv - (u0, v0), axis=1).max()) + cell
+    fade = max(2 * cell, feather * reach)
+    R = reach + fade
+    hint = source_normal_hint if source_normal_hint is not None else -nd
+    cs, ns = surface_frame(S, src_pt, R, hint)
+    if source_normal_hint is None and np.dot(ns, nd) < 0:
+        ns = -ns
+    d = np.linalg.norm(pos - cs, axis=1)
+    sidx = np.nonzero(~exclude & (d < R * 1.3))[0]
+    if len(sidx) == 0:
+        return None, None, "No splats found around the sample point"
+    rot_m, rot_q = rotation_between(ns, nd)
+    mapped = (pos[sidx] - cs) @ rot_m.T + cd
+    mu, mv, _ = surf.uvh(mapped)
+    kd_f = KDTree(len(fill_uv))
+    for i, (a, bb) in enumerate(fill_uv):
+        kd_f.insert((a, bb, 0.0), i)
+    kd_f.balance()
+    dist_fill = np.array([kd_f.find((a, bb, 0.0))[2] for a, bb in zip(mu, mv)], np.float32)
+    inside = dist_fill <= 0.75 * cell
+    w = np.where(inside, 1.0, feather_weight(dist_fill, fade + 0.75 * cell, 1.0))
+    use = w > 0.02
+    src, w, mapped = sidx[use], w[use], mapped[use]
+    if len(src) == 0:
+        return None, None, "Sample area does not cover the gap"
+    overrides["position"] = mapped.astype(np.float32)
+    rot = S.get("rotation")
+    if rot is not None:
+        overrides["rotation"] = quat_mul(rot_q, rot[src])
+    overrides.update(rotate_sh(S, src, rot_m))
+    if base is not None:
+        nb_ = base[src].copy()
+        if heal > 0:
+            ring_w = op[ring]
+            ring_dc = (base[ring, :3] * ring_w[:, None]).sum(0) / ring_w.sum()
+            outer = ~inside[use]
+            sw = nb_[outer, 3] if np.any(outer) else nb_[:, 3]
+            sdc = nb_[outer, :3] if np.any(outer) else nb_[:, :3]
+            src_dc = (sdc * sw[:, None]).sum(0) / max(sw.sum(), 1e-9)
+            nb_[:, :3] += heal * (ring_dc - src_dc)
+        nb_[:, 3] *= w
+        overrides[BASE_ATTR] = nb_
+    return src, overrides, "Filled from sample area"
+
+
+def _append(S, src, overrides, keep_mask):
+    overrides["gsp_selected"] = np.zeros((len(src), 1), bool)
+    S.append_copies(src, overrides)
+    S.keep(np.concatenate([keep_mask, np.ones(len(src), bool)]))
+    return len(src)
+
+
 def heal_fill(S, hole_mask, border=0.0, roughness=1.0, color_smooth=0.5, density=1.0,
               source=None, source_normal_hint=None, heal=1.0, feather=0.3, seed=0):
     """Delete the hole splats and regrow the surface across the gap.
@@ -423,168 +592,101 @@ def heal_fill(S, hole_mask, border=0.0, roughness=1.0, color_smooth=0.5, density
 
     # Local splat spacing, measured on the splats right at the hole's edge.
     edge = cand[np.argsort(dh)[:min(400, len(cand))]]
-    kd_c = _kdtree(pos[cand])
-    spacing = float(np.median([kd_c.find_n(p, 2)[1][2] for p in pos[edge]])) + 1e-9
+    spacing = _spacing(pos, cand, edge)
 
-    def frame_for(border_w):
+    def surface_for(border_w):
         ring = cand[dh < border_w]
-        if len(ring) < 12:
-            return None
-        c, e1, e2, n, inl = fit_frame(pos[ring], np.clip(op[ring], 0.05, 1.0))
-        return ring, c, e1, e2, n, inl
+        return _Surface(pos, op, ring) if len(ring) >= 12 else None
 
     b = border if border > 0 else 10.0 * spacing
-    fr = frame_for(b)
-    if fr is None:
+    surf = surface_for(b)
+    if surf is None:
         return 0, 0, "Not enough surrounding splats to heal from"
     if border <= 0:
         # Size the border from the hole's footprint on the surface (not its full
         # 3D extent, which a long pin would exaggerate).
-        _, c, e1, e2, n, _ = fr
-        uv = np.stack([(H - c) @ e1, (H - c) @ e2], 1)
+        hu, hv, _ = surf.uvh(H)
+        uv = np.stack([hu, hv], 1)
         foot = float(np.percentile(np.linalg.norm(uv - uv.mean(0), axis=1), 95))
         b = max(4.0 * spacing, 0.75 * foot)
-        fr = frame_for(b) or fr
-    ring, c, e1, e2, n, inl = fr
+        surf = surface_for(b) or surf
 
-    # Height field over the ring: quadratic surface plus per-splat residual (grain).
-    rel = pos[ring] - c
-    u, v, h = rel @ e1, rel @ e2, rel @ n
-    A = _quad_design(u, v)
-    fit_m = inl & (op[ring] > 0.2)
-    if np.count_nonzero(fit_m) < 6:
-        fit_m = inl
-    coef, *_ = np.linalg.lstsq(A[fit_m], h[fit_m], rcond=None)
-    resid = h - A @ coef
-
-    # Occupancy grid in the tangent plane.
-    cell = 2.0 * spacing
-    uvH = np.stack([(H - c) @ e1, (H - c) @ e2], 1)
-    all_uv = np.concatenate([np.stack([u, v], 1), uvH])
-    gmin = all_uv.min(0) - 2 * cell
-    dims = np.minimum(np.ceil((all_uv.max(0) + 2 * cell - gmin) / cell).astype(int), 600)
-    cell = float(max((all_uv.max(0) + 2 * cell - gmin).max() / dims.max(), cell))
-    dims = np.ceil((all_uv.max(0) + 2 * cell - gmin) / cell).astype(int) + 1
-
-    def to_cell(uv):
-        ij = np.floor((uv - gmin) / cell).astype(int)
-        return np.clip(ij, 0, dims - 1)
-
-    ring_ij = to_cell(np.stack([u, v], 1))
-    occ = np.zeros(dims, np.int32)
-    np.add.at(occ, (ring_ij[:, 0], ring_ij[:, 1]), 1)
-    occupied = occ > 0
+    hu, hv, _ = surf.uvh(H)
+    grid = _Grid(np.concatenate([np.stack([surf.u, surf.v], 1), np.stack([hu, hv], 1)]), 2.0 * spacing)
+    occupied = grid.count(surf.u, surf.v) > 0
     closed = _dilate(occupied, 1)
     enclosed = ~closed & ~_grid_flood_outside(~closed)
-    hole_cells = np.zeros(dims, bool)
-    hij = to_cell(uvH)
+    hole_cells = np.zeros(grid.dims, bool)
+    hij = grid.ij(hu, hv)
     hole_cells[hij[:, 0], hij[:, 1]] = True
-    fill = ~occupied & (_dilate(hole_cells, 1) | _dilate(enclosed, 1))
-    fill_ij = np.argwhere(fill)
+    fill_ij = np.argwhere(~occupied & (_dilate(hole_cells, 1) | _dilate(enclosed, 1)))
     if len(fill_ij) == 0:
-        # Hole was already covered by the border; just delete it.
         S.keep(kept)
         return len(hole_idx), 0, "Removed; the surrounding surface already covers the gap"
 
-    per_cell = len(ring) / max(np.count_nonzero(occupied), 1) * density
+    per_cell = len(surf.ring) / max(np.count_nonzero(occupied), 1) * density
+    src, overrides, msg = _populate(S, surf, grid, fill_ij, per_cell, hole_mask, rng, source,
+                                    source_normal_hint, roughness, color_smooth, heal, feather)
+    if src is None:
+        if source is not None:
+            return 0, 0, msg
+        S.keep(kept)
+        return len(hole_idx), 0, "Removed; " + msg.lower()
+    added = _append(S, src, overrides, kept)
+    return len(hole_idx), added, "Healed from surroundings" if source is None else msg
 
-    def surface_point(uu, vv):
-        return _quad_design(uu, vv) @ coef
 
-    def surface_normal(uu, vv):
-        du = coef[1] + 2 * coef[3] * uu + coef[4] * vv
-        dv = coef[2] + coef[4] * uu + 2 * coef[5] * vv
-        nn = n[None, :] - du[:, None] * e1[None, :] - dv[:, None] * e2[None, :]
-        return nn / np.linalg.norm(nn, axis=1, keepdims=True)
+def bridge_fill(S, ring, near, in_footprint, toward, edge=None, roughness=1.0, color_smooth=0.5,
+                density=1.0, source=None, heal=1.0, feather=0.3, seed=0, stiffness=0.05):
+    """Continue the surface across an empty gap.
 
-    base = S.base
-    overrides = {}
-    if source is None:
-        # ---- grow from the border
-        counts = rng.poisson(per_cell, len(fill_ij))
-        cells = np.repeat(fill_ij, counts, axis=0)
-        m = len(cells)
-        if m == 0:
-            S.keep(kept)
-            return len(hole_idx), 0, "Removed; border too sparse to regrow"
-        uvn = gmin + (cells + rng.random((m, 2))) * cell
-        kd_uv = KDTree(len(ring))
-        for i, (a, bb) in enumerate(zip(u, v)):
-            kd_uv.insert((a, bb, 0.0), i)
-        kd_uv.balance()
-        k = min(10, len(ring))
-        donor = np.empty(m, np.int64)
-        mean_dc = np.zeros((m, 3), np.float32)
-        for j, (a, bb) in enumerate(uvn):
-            nb = kd_uv.find_n((a, bb, 0.0), k)
-            ids = np.array([x[1] for x in nb])
-            ds = np.array([x[2] for x in nb]) + 1e-9
-            wts = 1.0 / ds
-            wts /= wts.sum()
-            donor[j] = ids[rng.choice(len(ids), p=wts)]
-            if base is not None:
-                mean_dc[j] = (base[ring[ids], :3] * wts[:, None]).sum(0)
-        src = ring[donor]
-        hh = surface_point(uvn[:, 0], uvn[:, 1]) + roughness * resid[donor]
-        overrides["position"] = (c + uvn[:, :1] * e1 + uvn[:, 1:] * e2 + hh[:, None] * n).astype(np.float32)
-        if base is not None:
-            nb_ = base[src].copy()
-            nb_[:, :3] = (1 - color_smooth) * nb_[:, :3] + color_smooth * mean_dc
-            overrides[BASE_ATTR] = nb_
-        msg = "Healed from surroundings"
-    else:
-        # ---- clone from a sample area into the gap, tone-matched to the border
-        src_pt = np.asarray(source, np.float32)
-        fill_uv = gmin + (fill_ij + 0.5) * cell
-        u0, v0 = fill_uv.mean(0)
-        cd = c + u0 * e1 + v0 * e2 + surface_point(np.array([u0]), np.array([v0]))[0] * n
-        nd = surface_normal(np.array([u0]), np.array([v0]))[0]
-        reach = float(np.linalg.norm(fill_uv - (u0, v0), axis=1).max()) + cell
-        fade = max(2 * cell, feather * reach)
-        R = reach + fade
-        hint = source_normal_hint if source_normal_hint is not None else -nd
-        cs, ns = surface_frame(S, src_pt, R, hint)
-        if source_normal_hint is None and np.dot(ns, nd) < 0:
-            ns = -ns
-        d = np.linalg.norm(pos - cs, axis=1)
-        sidx = np.nonzero(kept & (d < R * 1.3))[0]
-        if len(sidx) == 0:
-            return 0, 0, "No splats found around the sample point"
-        rot_m, rot_q = rotation_between(ns, nd)
-        mapped = (pos[sidx] - cs) @ rot_m.T + cd
-        muv = np.stack([(mapped - c) @ e1, (mapped - c) @ e2], 1)
-        kd_f = KDTree(len(fill_uv))
-        for i, (a, bb) in enumerate(fill_uv):
-            kd_f.insert((a, bb, 0.0), i)
-        kd_f.balance()
-        dist_fill = np.array([kd_f.find((a, bb, 0.0))[2] for a, bb in muv], np.float32)
-        inside = dist_fill <= 0.75 * cell
-        w = np.where(inside, 1.0, feather_weight(dist_fill, fade + 0.75 * cell, 1.0))
-        use = w > 0.02
-        src, w, mapped = sidx[use], w[use], mapped[use]
-        if len(src) == 0:
-            return 0, 0, "Sample area does not cover the gap"
-        overrides["position"] = mapped.astype(np.float32)
-        rot = S.get("rotation")
-        if rot is not None:
-            overrides["rotation"] = quat_mul(rot_q, rot[src])
-        overrides.update(rotate_sh(S, src, rot_m))
-        if base is not None:
-            nb_ = base[src].copy()
-            if heal > 0:
-                ring_w = op[ring]
-                ring_dc = (base[ring, :3] * ring_w[:, None]).sum(0) / ring_w.sum()
-                outer = ~inside[use]
-                sw = nb_[outer, 3] if np.any(outer) else nb_[:, 3]
-                sdc = nb_[outer, :3] if np.any(outer) else nb_[:, :3]
-                src_dc = (sdc * sw[:, None]).sum(0) / max(sw.sum(), 1e-9)
-                nb_[:, :3] += heal * (ring_dc - src_dc)
-            nb_[:, 3] *= w
-            overrides[BASE_ATTR] = nb_
-        msg = "Filled from sample area"
+    ring        : indices of intact front-surface splats around the gap (the rim)
+    near        : indices of all splats in and around the gap, at any depth
+    in_footprint: fn(points (M, 3)) -> bool mask, True where the user painted the gap
+    toward      : a direction pointing out of the surface, towards the viewer
+    edge        : the rim splats right at the hole's edge; they set which layer is the
+                  surface, so rim splats well in front of or behind it (a leg or wing
+                  crossing the rim) are ignored
 
-    overrides["gsp_selected"] = np.zeros((len(src), 1), bool)
-    S.append_copies(src, overrides)
-    added = len(src)
-    S.keep(np.concatenate([kept, np.ones(added, bool)]))
-    return len(hole_idx), added, msg
+    A smooth surface is fitted to the rim and new splats are grown on it wherever
+    it passes through the painted footprint and nothing already sits on it. Splats
+    deeper inside the gap (the far wall of a pin hole) are left alone; the bridge
+    simply covers them. Returns (removed, added, message).
+    """
+    rng = np.random.default_rng(seed)
+    pos, op = S.pos, S.opacity
+    if len(ring) < 12:
+        return 0, 0, "Not enough intact surface around the gap; paint a little onto it"
+    spacing = _spacing(pos, ring, ring[rng.choice(len(ring), min(400, len(ring)), replace=False)])
+    if edge is not None and len(edge) >= 12:
+        c, _, _, n, inl = fit_frame(pos[edge], np.clip(op[edge], 0.05, 1.0))
+        he = (pos[edge][inl] - c) @ n
+        mad = float(np.median(np.abs(he - np.median(he)))) * 1.4826
+        h = (pos[ring] - c) @ n
+        layer = np.abs(h - np.median(he)) < max(4.0 * mad, 3.0 * spacing)
+        if layer.sum() >= 12:
+            ring = ring[layer]
+    surf = _Surface(pos, op, ring, toward, stiffness)
+    grid = _Grid(np.stack([surf.u, surf.v], 1), 2.0 * spacing)
+
+    # Cells that already have surface on them: any splat close to the fitted height.
+    nu, nv, nh = surf.uvh(pos[near])
+    mad = np.median(np.abs(surf.resid - np.median(surf.resid))) * 1.4826
+    tol = max(2.0 * spacing, 3.0 * mad)
+    on_surface = np.abs(nh - surf.height(nu, nv)) < tol
+    occupied = grid.count(nu[on_surface], nv[on_surface]) > 0
+    ring_cells = grid.count(surf.u, surf.v) > 0
+
+    all_ij = np.argwhere(np.ones(grid.dims, bool))
+    cu, cv = grid.centres(all_ij).T
+    painted = in_footprint(surf.point(cu, cv)).reshape(grid.dims)
+    fill_ij = np.argwhere(painted & ~occupied)
+    if len(fill_ij) == 0:
+        return 0, 0, "The surface under the painted area is already covered"
+    per_cell = len(ring) / max(np.count_nonzero(ring_cells), 1) * density
+    src, overrides, msg = _populate(S, surf, grid, fill_ij, per_cell, np.zeros(S.n, bool), rng,
+                                    source, None, roughness, color_smooth, heal, feather)
+    if src is None:
+        return 0, 0, msg
+    added = _append(S, src, overrides, np.ones(S.n, bool))
+    return 0, added, "Bridged from surroundings" if source is None else "Bridged from sample area"
