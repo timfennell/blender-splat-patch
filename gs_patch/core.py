@@ -133,9 +133,10 @@ def surface_frame(S, center, radius, view_dir, min_opacity=0.15):
     """Anchor point and outward normal of the splat surface near center."""
     view_dir = np.asarray(view_dir, np.float32)
     view_dir = view_dir / max(np.linalg.norm(view_dir), 1e-12)
-    d = np.linalg.norm(S.pos - center, axis=1)
-    m = (d < radius * 1.5) & (S.opacity > min_opacity)
-    if np.count_nonzero(m) < 8:
+    cand = S.near(center, radius * 1.5)
+    d = np.linalg.norm(S.pos[cand] - center, axis=1)
+    m = cand[(d < radius * 1.5) & (S.opacity[cand] > min_opacity)]
+    if len(m) < 8:
         return np.asarray(center, np.float32), -view_dir
     c, _, _, n, inlier = fit_frame(S.pos[m], S.opacity[m])
     if np.dot(n, view_dir) > 0:
@@ -150,17 +151,30 @@ def segment_distance(point, pos, axes):
     return np.linalg.norm(rel - t[:, None] * axes, axis=1)
 
 
-def sphere_hits(pos, center, radius, feather, axes=None):
-    """Splats inside the sphere. With axes, a splat counts if any part of its long axis does."""
-    d = np.linalg.norm(pos - center, axis=1)
+def sphere_hits(pos, center, radius, feather, axes=None, cand=None):
+    """Splats inside the sphere. With axes, a splat counts if any part of its long axis does.
+
+    cand optionally limits the test to those indices (from a spatial query); the
+    returned indices are always into pos.
+    """
+    if cand is None:
+        cand = np.arange(len(pos))
+    d = np.linalg.norm(pos[cand] - center, axis=1)
     if axes is not None:
-        reach = np.linalg.norm(axes, axis=1)
-        near = np.nonzero(d < radius + reach)[0]
-        d_near = segment_distance(center, pos[near], axes[near])
-        d = np.full(len(pos), np.inf, np.float32)
-        d[near] = d_near
-    idx = np.nonzero(d < radius)[0]
-    return idx, feather_weight(d[idx], radius, feather)
+        reach = np.linalg.norm(axes[cand], axis=1)
+        close = d < radius + reach
+        d = np.full(len(cand), np.inf, np.float32)
+        d[close] = segment_distance(center, pos[cand[close]], axes[cand[close]])
+    keep = d < radius
+    return cand[keep], feather_weight(d[keep], radius, feather)
+
+
+def sphere_hits_S(S, center, radius, feather, axes=None, reach_cap=0.0, long_idx=None):
+    """sphere_hits over a SplatSet using its spatial grid (plus the few very long splats)."""
+    cand = S.near(center, radius + reach_cap)
+    if axes is not None and long_idx is not None and len(long_idx):
+        cand = np.union1d(cand, long_idx[long_idx < S.n])
+    return sphere_hits(S.pos, center, radius, feather, axes, cand)
 
 
 # ---------------------------------------------------------------- floaters
@@ -214,13 +228,16 @@ def floater_mask(S, gap=0.0, keep_fraction=0.02):
     Clumps are splats joined by chains with no hole wider than about `gap`. Every
     clump smaller than keep_fraction of the largest one is marked.
     """
-    if S.n == 0:
-        return np.zeros(0, bool), 0.0
+    vis = np.nonzero(S.visible)[0]
+    if len(vis) == 0:
+        return np.zeros(S.n, bool), 0.0
     cell = gap if gap > 0 else auto_gap(S)
-    comp = connected_components(S.pos, cell)
+    comp = connected_components(S.pos[vis], cell)
     _, inverse, counts = np.unique(comp, return_inverse=True, return_counts=True)
-    size = counts[inverse]
-    return size < keep_fraction * counts.max(), cell
+    size = counts[np.asarray(inverse).ravel()]
+    out = np.zeros(S.n, bool)
+    out[vis] = size < keep_fraction * counts.max()
+    return out, cell
 
 
 def ring_mean_dc(S, center, radius, exclude=None):
@@ -228,11 +245,13 @@ def ring_mean_dc(S, center, radius, exclude=None):
     dc = S.dc
     if dc is None:
         return None
-    d = np.linalg.norm(S.pos - center, axis=1)
-    m = (d > radius) & (d < radius * 1.6) & (S.opacity > 0.2)
+    cand = S.near(center, radius * 1.6)
+    d = np.linalg.norm(S.pos[cand] - center, axis=1)
+    m = (d > radius) & (d < radius * 1.6) & (S.opacity[cand] > 0.2)
     if exclude is not None:
-        m &= ~exclude
-    if np.count_nonzero(m) < 4:
+        m &= ~exclude[cand]
+    m = cand[m]
+    if len(m) < 4:
         return None
     w = S.opacity[m]
     return (dc[m] * w[:, None]).sum(0) / w.sum()
@@ -275,10 +294,10 @@ class Stroke:
         """Copy the sphere at (cs, ns) onto (cd, nd), reoriented to the target surface."""
         S = self.S
         if replace:
-            idx, w = sphere_hits(S.pos, cd, radius, feather)
+            idx, w = sphere_hits(S.pos, cd, radius, feather, cand=S.near(cd, radius))
             self.erase(idx, w)
-        idx, w = sphere_hits(S.pos, cs, radius, feather)
-        fresh = ~self.used_src[idx]
+        idx, w = sphere_hits(S.pos, cs, radius, feather, cand=S.near(cs, radius))
+        fresh = ~self.used_src[idx] & S.visible[idx]
         idx, w = idx[fresh], w[fresh]
         keep = w > 0.02
         idx, w = idx[keep], w[keep]
@@ -338,15 +357,9 @@ class Stroke:
             S.append_copies(src, overrides)
             added = len(src)
         factor = np.concatenate([self.factor, np.ones(S.n - n0, np.float32)])
-        base = S.base
-        if base is not None:
-            S.fade(factor)
-            keep = factor > 0.02
-        else:
-            keep = factor > 0.5
-        removed = int(np.count_nonzero(~keep))
-        if removed:
-            S.keep(keep)
+        gone = factor <= (0.02 if S.base is not None else 0.5)
+        S.fade(np.where(gone, 1.0, factor))
+        removed = S.hide(gone)
         return removed, added
 
 
@@ -359,19 +372,18 @@ def apply_restore(S, T, remove_added, unfade, bring_back):
     bring_back  : mask over the stash T of erased originals, to put back into S
     T is modified in place. Returns (restored, unfaded, removed) counts.
     """
-    base = S.base
-    unfade = unfade & S.faded
-    if base is not None and unfade.any():
-        base[unfade, 3] = S.orig_opacity[unfade]
-    S.faded[unfade] = False
-    remove_added = remove_added & S.added
-    back = 0 if T is None else int(bring_back.sum())
-    if remove_added.any():
-        S.keep(~remove_added, stash=False)
-    if back:
+    # Erased splats are hidden in place, so restoring them is un-hiding; splats a
+    # 0.1.3 session moved to the separate stash (T) are appended back.
+    unfade = unfade & ~S.added & (S.hidden | S.faded)
+    back = int((unfade & S.hidden).sum())
+    unfaded = int((unfade & ~S.hidden).sum())
+    S.unhide(unfade)
+    removed = S.hide(remove_added & S.added)
+    if T is not None and bring_back.any():
+        back += int(bring_back.sum())
         S.append_rows(T.rows(bring_back))
         T.keep(~bring_back, stash=False)
-    return back, int(unfade.sum()), int(remove_added.sum())
+    return back, unfaded, removed
 
 
 # ---------------------------------------------------------------- heal fill
@@ -541,8 +553,9 @@ def _populate(S, surf, grid, fill_ij, per_cell, exclude, rng, source=None, sourc
     cs, ns = surface_frame(S, src_pt, R, hint)
     if source_normal_hint is None and np.dot(ns, nd) < 0:
         ns = -ns
-    d = np.linalg.norm(pos - cs, axis=1)
-    sidx = np.nonzero(~exclude & (d < R * 1.3))[0]
+    cand = S.near(cs, R * 1.3)
+    d = np.linalg.norm(pos[cand] - cs, axis=1)
+    sidx = cand[~exclude[cand] & S.visible[cand] & (d < R * 1.3)]
     if len(sidx) == 0:
         return None, None, "No splats found around the sample point"
     rot_m, rot_q = rotation_between(ns, nd)
@@ -579,10 +592,12 @@ def _populate(S, surf, grid, fill_ij, per_cell, exclude, rng, source=None, sourc
     return src, overrides, "Filled from sample area"
 
 
-def _append(S, src, overrides, keep_mask):
+def _append(S, src, overrides, hide_mask=None):
+    """Add the new splats and erase (hide) hide_mask. Returns the number added."""
     overrides["gsp_selected"] = np.zeros((len(src), 1), bool)
     S.append_copies(src, overrides)
-    S.keep(np.concatenate([keep_mask, np.ones(len(src), bool)]))
+    if hide_mask is not None:
+        S.hide(np.concatenate([hide_mask, np.zeros(len(src), bool)]))
     return len(src)
 
 
@@ -598,6 +613,7 @@ def heal_fill(S, hole_mask, border=0.0, roughness=1.0, color_smooth=0.5, density
     """
     rng = np.random.default_rng(seed)
     pos, op = S.pos, S.opacity
+    hole_mask = hole_mask & S.visible
     hole_idx = np.nonzero(hole_mask)[0]
     if len(hole_idx) == 0:
         return 0, 0, "Nothing selected to fill"
@@ -606,7 +622,7 @@ def heal_fill(S, hole_mask, border=0.0, roughness=1.0, color_smooth=0.5, density
     h_rad = float(np.percentile(np.linalg.norm(H - hc, axis=1), 95)) + 1e-9
 
     # Existing splats near the hole, with their distance to the nearest hole splat.
-    kept = ~hole_mask
+    kept = ~hole_mask & S.visible
     lo, hi = H.min(0) - h_rad, H.max(0) + h_rad
     cand = np.nonzero(kept & np.all((pos > lo) & (pos < hi), axis=1))[0]
     if len(cand) < 12:
@@ -645,7 +661,7 @@ def heal_fill(S, hole_mask, border=0.0, roughness=1.0, color_smooth=0.5, density
     hole_cells[hij[:, 0], hij[:, 1]] = True
     fill_ij = np.argwhere(~occupied & (_dilate(hole_cells, 1) | _dilate(enclosed, 1)))
     if len(fill_ij) == 0:
-        S.keep(kept)
+        S.hide(hole_mask)
         return len(hole_idx), 0, "Removed; the surrounding surface already covers the gap"
 
     per_cell = len(surf.ring) / max(np.count_nonzero(occupied), 1) * density
@@ -654,9 +670,9 @@ def heal_fill(S, hole_mask, border=0.0, roughness=1.0, color_smooth=0.5, density
     if src is None:
         if source is not None:
             return 0, 0, msg
-        S.keep(kept)
+        S.hide(hole_mask)
         return len(hole_idx), 0, "Removed; " + msg.lower()
-    added = _append(S, src, overrides, kept)
+    added = _append(S, src, overrides, hole_mask)
     return len(hole_idx), added, "Healed from surroundings" if source is None else msg
 
 
@@ -712,5 +728,5 @@ def bridge_fill(S, ring, near, in_footprint, toward, edge=None, roughness=1.0, c
                                     source, None, roughness, color_smooth, heal, feather)
     if src is None:
         return 0, 0, msg
-    added = _append(S, src, overrides, np.ones(S.n, bool))
+    added = _append(S, src, overrides)
     return 0, added, "Bridged from surroundings" if source is None else "Bridged from sample area"

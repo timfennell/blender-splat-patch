@@ -34,7 +34,9 @@ Pick a tool button to start painting. While the brush is running:
 | `1`–`7` | Erase / Select / Clone / Heal / Spot Heal / Bridge / Restore |
 | Esc / Enter | stop the brush |
 
-MMB, the scroll wheel and trackpad gestures still navigate the view. Each stroke is one undo step.
+MMB, the scroll wheel and trackpad gestures still navigate the view. Strokes don't create Blender undo
+steps (on big scans each would copy the whole cloud): use the **Restore** brush to undo edits anywhere.
+Ctrl+Z is blocked while the brush runs; after you leave the brush, Ctrl+Z takes back the whole session.
 
 - **Erase**: deletes splats; the feather fades them instead. Erase, Select and Spot Heal also work over
   empty space: with nothing solid under the brush (a white circle), they take everything under the
@@ -63,8 +65,8 @@ MMB, the scroll wheel and trackpad gestures still navigate the view. Each stroke
 
 Edits are recorded, so any part of the model can be taken back to the original scan:
 
-- Splats that an edit removes (erase, clone's *Replace*, spot heal, fill, Delete Selected) are kept in a
-  hidden stash saved in the .blend next to the scan.
+- Splats that an edit removes (erase, clone's *Replace*, spot heal, fill, Delete Selected) aren't deleted:
+  they're hidden in place (opacity 0) with their original opacity kept, and saved in the .blend.
 - Splats that an edit adds are tagged, and splats that a feathered edit fades keep their original opacity.
 
 ![Restore brush: the removed pin shows red, bridged and cloned patches green](docs/images/restore.jpg)
@@ -102,8 +104,10 @@ the original file exactly. Positions are written in object space (the object tra
 
 ## Limits
 
-- The brush reads the whole cloud when it starts and each stroke is applied on release, so very large
-  scans (millions of splats) take a moment per stroke.
+- Large scans: on a 2-million-splat scan, starting the brush takes about a second, hovering and dabs a
+  few milliseconds, and erase/select/restore strokes under 0.1 s. Strokes that add splats (Clone, Heal,
+  Spot Heal, Bridge) take about 0.7 s, because Blender has to rewrite the whole cloud when it grows.
+- Erased splats stay in the .blend (hidden) so they can be restored, until you export.
 
 ## Development
 

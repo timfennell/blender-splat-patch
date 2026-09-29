@@ -31,12 +31,15 @@ _LAYOUT = {
 SELECT_ATTR = "gsp_selected"
 ADDED_ATTR = "gsp_added"            # splat was created by an edit (clone, heal, fill, bridge)
 FADED_ATTR = "gsp_faded"            # splat's opacity was reduced by a feathered edit
+HIDDEN_ATTR = "gsp_hidden"          # splat was erased: kept (opacity 0) so it can be restored
 ORIG_OPACITY_ATTR = "gsp_orig_opacity"
 BASE_ATTR = "radiance:base"
 
 # Bookkeeping attributes every splat set carries, created on first read.
 _TRACKING = {SELECT_ATTR: 'BOOLEAN', ADDED_ATTR: 'BOOLEAN', FADED_ATTR: 'BOOLEAN',
-             ORIG_OPACITY_ATTR: 'FLOAT'}
+             HIDDEN_ATTR: 'BOOLEAN', ORIG_OPACITY_ATTR: 'FLOAT'}
+# Columns an opacity-only edit (erase, fade, restore) changes.
+OPACITY_COLUMNS = (BASE_ATTR, HIDDEN_ATTR, FADED_ATTR, ORIG_OPACITY_ATTR)
 SH_C0 = 0.28209479177387814
 
 
@@ -54,6 +57,7 @@ class SplatSet:
         # Original splats removed since the last save; they go to the stash so the
         # restore brush can bring them back. Each entry is {name: [data_type, rows]}.
         self.removed = []
+        self._grid = None
 
     # ------------------------------------------------------------------ io
     @classmethod
@@ -77,10 +81,14 @@ class SplatSet:
                 arrays[name] = [data_type, np.zeros((n, width), dtype)]
         return cls(n, arrays)
 
-    def write(self, pc):
+    def write(self, pc, only=None):
+        """Write back to the point cloud. `only` limits it to those columns when the count is unchanged."""
         if len(pc.points) != self.n:
             pc.resize(self.n)
+            only = None
         for name, (data_type, arr) in self.arrays.items():
+            if only is not None and name not in only and pc.attributes.get(name) is not None:
+                continue
             attr = pc.attributes.get(name)
             if attr is None:
                 attr = pc.attributes.new(name, data_type, 'POINT')
@@ -130,6 +138,26 @@ class SplatSet:
     def orig_opacity(self):
         return self.arrays[ORIG_OPACITY_ATTR][1][:, 0]
 
+    @property
+    def hidden(self):
+        return self.arrays[HIDDEN_ATTR][1][:, 0]
+
+    @property
+    def visible(self):
+        return ~self.hidden
+
+    # --------------------------------------------------------- spatial grid
+    def near(self, center, radius):
+        """Indices of splats that may lie within radius of center (a superset; filter by distance)."""
+        g = self._grid
+        if g is None or g.n > self.n or self.n - g.n > max(100000, self.n // 10):
+            g = self._grid = _Grid(self.pos, self)
+        cand = g.query(center, radius)
+        if self.n > g.n:   # splats added since the grid was built
+            extra = np.arange(g.n, self.n)
+            cand = np.concatenate([cand, extra[np.linalg.norm(self.pos[extra] - center, axis=1) < radius]])
+        return cand
+
     def sh_names(self):
         names = [k for k in self.arrays if k.startswith("radiance:sh_")]
         return sorted(names, key=lambda k: int(k.rsplit('_', 1)[1]))
@@ -145,9 +173,40 @@ class SplatSet:
         return np.clip(0.5 + SH_C0 * dc, 0.0, 1.0)
 
     # ------------------------------------------------------------- editing
+    def hide(self, mask):
+        """Erase splats without removing them: opacity 0, flagged, original opacity kept."""
+        mask = np.asarray(mask, bool) & ~self.hidden
+        if not mask.any():
+            return 0
+        base = self.base
+        remember = mask & ~self.faded
+        if base is not None:
+            self.orig_opacity[remember] = base[remember, 3]
+            base[mask, 3] = 0.0
+        self.hidden[mask] = True
+        self.faded[mask] = False
+        self.selected[mask] = False
+        return int(mask.sum())
+
+    def unhide(self, mask):
+        """Bring back erased or faded splats at their original opacity."""
+        mask = np.asarray(mask, bool) & (self.hidden | self.faded)
+        base = self.base
+        if base is not None:
+            base[mask, 3] = self.orig_opacity[mask]
+        self.hidden[mask] = False
+        self.faded[mask] = False
+        return int(mask.sum())
+
+    def visible_subset(self):
+        """A copy with the erased splats dropped: what export writes."""
+        vis = self.visible
+        return SplatSet(int(vis.sum()), {k: [dt, a[vis]] for k, (dt, a) in self.arrays.items()})
+
     def keep(self, mask, stash=True):
         """Keep only mask. Removed original splats are remembered for the stash unless stash=False."""
         mask = np.asarray(mask, bool)
+        self._grid = None
         if stash:
             gone = ~mask & ~self.added
             if gone.any():
@@ -168,6 +227,7 @@ class SplatSet:
         base = self.base
         if base is None:
             return
+        factor = np.where(self.hidden, 1.0, factor)
         changed = factor < 1.0
         first = changed & ~self.faded & ~self.added
         self.orig_opacity[first] = base[first, 3]
@@ -183,6 +243,7 @@ class SplatSet:
             return
         m = len(src_idx)
         defaults = {ADDED_ATTR: np.ones((m, 1), bool), FADED_ATTR: np.zeros((m, 1), bool),
+                    HIDDEN_ATTR: np.zeros((m, 1), bool),
                     ORIG_OPACITY_ATTR: np.zeros((m, 1), np.float32), SELECT_ATTR: np.zeros((m, 1), bool)}
         for name, entry in self.arrays.items():
             new = overrides.get(name)
@@ -203,13 +264,52 @@ class SplatSet:
                 new = rows[name][1]
             else:
                 new = np.zeros((m,) + entry[1].shape[1:], entry[1].dtype)
-            if name in (ADDED_ATTR, FADED_ATTR, SELECT_ATTR):
+            if name in (ADDED_ATTR, FADED_ATTR, SELECT_ATTR, HIDDEN_ATTR):
                 new = np.zeros((m, 1), bool)
             entry[1] = np.concatenate([entry[1], np.asarray(new, entry[1].dtype)], axis=0)
         self.n += m
 
     def rows(self, mask):
         return {name: [dt, arr[mask].copy()] for name, (dt, arr) in self.arrays.items()}
+
+
+class _Grid:
+    """Uniform voxel grid over splat centres, for fast local queries on large scans."""
+
+    def __init__(self, pos, S):
+        self.n = len(pos)
+        scale = S.get("scale")
+        cell = 2.0 * float(np.median(scale.max(1))) if scale is not None and len(pos) else 0.0
+        extent = float(np.max(pos.max(0) - pos.min(0))) if len(pos) else 1.0
+        self.cell = max(cell, extent / 1024.0, 1e-9)
+        self.lo = pos.min(0) if len(pos) else np.zeros(3, np.float32)
+        ijk = np.floor((pos - self.lo) / self.cell).astype(np.int64)
+        self.dims = ijk.max(0) + 1 if len(pos) else np.ones(3, np.int64)
+        key = (ijk[:, 0] * self.dims[1] + ijk[:, 1]) * self.dims[2] + ijk[:, 2]
+        self.order = np.argsort(key, kind='stable')
+        sk = key[self.order]
+        self.keys, self.starts = np.unique(sk, return_index=True)
+        self.ends = np.append(self.starts[1:], len(sk))
+
+    def query(self, center, radius):
+        if self.n == 0:
+            return np.zeros(0, np.int64)
+        a = np.clip(np.floor((center - radius - self.lo) / self.cell).astype(np.int64), 0, self.dims - 1)
+        b = np.clip(np.floor((center + radius - self.lo) / self.cell).astype(np.int64), 0, self.dims - 1)
+        span = b - a + 1
+        if np.prod(span) > 3_000_000:        # huge brush: scanning everything is cheaper
+            return np.arange(self.n)
+        ii, jj, kk = np.meshgrid(np.arange(a[0], b[0] + 1), np.arange(a[1], b[1] + 1),
+                                 np.arange(a[2], b[2] + 1), indexing='ij')
+        want = ((ii * self.dims[1] + jj) * self.dims[2] + kk).ravel()
+        at = np.clip(np.searchsorted(self.keys, want), 0, len(self.keys) - 1)
+        found = at[self.keys[at] == want]
+        s, e = self.starts[found], self.ends[found]
+        lengths = e - s
+        if lengths.sum() == 0:
+            return np.zeros(0, np.int64)
+        offs = np.repeat(s - np.concatenate([[0], np.cumsum(lengths)[:-1]]), lengths)
+        return self.order[np.arange(lengths.sum()) + offs]
 
 
 def concat_rows(parts):
