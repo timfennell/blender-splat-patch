@@ -40,6 +40,12 @@ class GSP_Props(bpy.types.PropertyGroup):
                                      description="Regrown splat density relative to the surroundings")
     cursor_radius: bpy.props.FloatProperty(name="Radius", default=0.1, min=0.0, unit='LENGTH')
     show_selection: bpy.props.BoolProperty(name="Show Selection", default=True)
+    restore_erased: bpy.props.BoolProperty(
+        name="Restore Erased", default=True,
+        description="Bring back splats that edits erased or faded (red and yellow)")
+    remove_added: bpy.props.BoolProperty(
+        name="Remove Added", default=True,
+        description="Remove splats that edits added (green)")
     bridge_source: bpy.props.EnumProperty(name="Fill With", items=[
         ('SURROUND', "Surroundings", "Grow the bridge from the rim around the hole"),
         ('SAMPLE', "Sample", "Clone the area around the sample point onto the bridge, colour-matched to the rim"),
@@ -105,8 +111,12 @@ class GSP_PT_brush(bpy.types.Panel):
         col.prop(p, "radius_px")
         col.prop(p, "feather", slider=True)
         col.prop(p, "spacing")
-        if p.tool in {'ERASE', 'SELECT', 'SPOT'}:
+        if p.tool in {'ERASE', 'SELECT', 'SPOT', 'RESTORE'}:
             col.prop(p, "depth_mode", expand=True)
+        if p.tool == 'RESTORE':
+            row = col.row(align=True)
+            row.prop(p, "restore_erased", toggle=True, icon='RECOVER_LAST')
+            row.prop(p, "remove_added", toggle=True, icon='TRASH')
         if p.tool == 'BRIDGE':
             col.prop(p, "bridge_source", expand=True)
             col.prop(p, "bridge_rim")

@@ -340,7 +340,7 @@ class Stroke:
         factor = np.concatenate([self.factor, np.ones(S.n - n0, np.float32)])
         base = S.base
         if base is not None:
-            base[:, 3] *= factor
+            S.fade(factor)
             keep = factor > 0.02
         else:
             keep = factor > 0.5
@@ -348,6 +348,30 @@ class Stroke:
         if removed:
             S.keep(keep)
         return removed, added
+
+
+# ---------------------------------------------------------------- restore
+def apply_restore(S, T, remove_added, unfade, bring_back):
+    """Undo edits for the marked splats.
+
+    remove_added: mask over S of splats added by edits, to delete
+    unfade      : mask over S of faded splats, to return to their original opacity
+    bring_back  : mask over the stash T of erased originals, to put back into S
+    T is modified in place. Returns (restored, unfaded, removed) counts.
+    """
+    base = S.base
+    unfade = unfade & S.faded
+    if base is not None and unfade.any():
+        base[unfade, 3] = S.orig_opacity[unfade]
+    S.faded[unfade] = False
+    remove_added = remove_added & S.added
+    back = 0 if T is None else int(bring_back.sum())
+    if remove_added.any():
+        S.keep(~remove_added, stash=False)
+    if back:
+        S.append_rows(T.rows(bring_back))
+        T.keep(~bring_back, stash=False)
+    return back, int(unfade.sum()), int(remove_added.sum())
 
 
 # ---------------------------------------------------------------- heal fill

@@ -29,7 +29,14 @@ _LAYOUT = {
 }
 
 SELECT_ATTR = "gsp_selected"
+ADDED_ATTR = "gsp_added"            # splat was created by an edit (clone, heal, fill, bridge)
+FADED_ATTR = "gsp_faded"            # splat's opacity was reduced by a feathered edit
+ORIG_OPACITY_ATTR = "gsp_orig_opacity"
 BASE_ATTR = "radiance:base"
+
+# Bookkeeping attributes every splat set carries, created on first read.
+_TRACKING = {SELECT_ATTR: 'BOOLEAN', ADDED_ATTR: 'BOOLEAN', FADED_ATTR: 'BOOLEAN',
+             ORIG_OPACITY_ATTR: 'FLOAT'}
 SH_C0 = 0.28209479177387814
 
 
@@ -44,6 +51,9 @@ class SplatSet:
     def __init__(self, n, arrays):
         self.n = n
         self.arrays = arrays  # name -> [data_type, ndarray]
+        # Original splats removed since the last save; they go to the stash so the
+        # restore brush can bring them back. Each entry is {name: [data_type, rows]}.
+        self.removed = []
 
     # ------------------------------------------------------------------ io
     @classmethod
@@ -61,8 +71,10 @@ class SplatSet:
             if n:
                 attr.data.foreach_get(key, buf)
             arrays[attr.name] = [attr.data_type, buf.reshape(n, width)]
-        if SELECT_ATTR not in arrays:
-            arrays[SELECT_ATTR] = ['BOOLEAN', np.zeros((n, 1), bool)]
+        for name, data_type in _TRACKING.items():
+            if name not in arrays:
+                width, _, dtype = _LAYOUT[data_type]
+                arrays[name] = [data_type, np.zeros((n, width), dtype)]
         return cls(n, arrays)
 
     def write(self, pc):
@@ -106,6 +118,18 @@ class SplatSet:
     def selected(self):
         return self.arrays[SELECT_ATTR][1][:, 0]
 
+    @property
+    def added(self):
+        return self.arrays[ADDED_ATTR][1][:, 0]
+
+    @property
+    def faded(self):
+        return self.arrays[FADED_ATTR][1][:, 0]
+
+    @property
+    def orig_opacity(self):
+        return self.arrays[ORIG_OPACITY_ATTR][1][:, 0]
+
     def sh_names(self):
         names = [k for k in self.arrays if k.startswith("radiance:sh_")]
         return sorted(names, key=lambda k: int(k.rsplit('_', 1)[1]))
@@ -121,21 +145,95 @@ class SplatSet:
         return np.clip(0.5 + SH_C0 * dc, 0.0, 1.0)
 
     # ------------------------------------------------------------- editing
-    def keep(self, mask):
+    def keep(self, mask, stash=True):
+        """Keep only mask. Removed original splats are remembered for the stash unless stash=False."""
+        mask = np.asarray(mask, bool)
+        if stash:
+            gone = ~mask & ~self.added
+            if gone.any():
+                rows = {name: [dt, arr[gone].copy()] for name, (dt, arr) in self.arrays.items()}
+                # Stash them as they were before any fade, so restoring is exact.
+                was_faded = rows[FADED_ATTR][1][:, 0]
+                if BASE_ATTR in rows and was_faded.any():
+                    rows[BASE_ATTR][1][was_faded, 3] = rows[ORIG_OPACITY_ATTR][1][was_faded, 0]
+                rows[FADED_ATTR][1][:] = False
+                rows[SELECT_ATTR][1][:] = False
+                self.removed.append(rows)
         for entry in self.arrays.values():
             entry[1] = entry[1][mask]
         self.n = int(np.count_nonzero(mask))
 
+    def fade(self, factor):
+        """Multiply opacity by factor (N,), remembering each splat's opacity before its first fade."""
+        base = self.base
+        if base is None:
+            return
+        changed = factor < 1.0
+        first = changed & ~self.faded & ~self.added
+        self.orig_opacity[first] = base[first, 3]
+        self.faded[first] = True
+        base[:, 3] *= factor
+
     def append_copies(self, src_idx, overrides):
-        """Append copies of points src_idx; overrides maps attr name -> (M, w) array."""
+        """Append copies of points src_idx; overrides maps attr name -> (M, w) array.
+
+        New splats are flagged as added by an edit, so the restore brush can remove them.
+        """
         if len(src_idx) == 0:
             return
+        m = len(src_idx)
+        defaults = {ADDED_ATTR: np.ones((m, 1), bool), FADED_ATTR: np.zeros((m, 1), bool),
+                    ORIG_OPACITY_ATTR: np.zeros((m, 1), np.float32), SELECT_ATTR: np.zeros((m, 1), bool)}
         for name, entry in self.arrays.items():
             new = overrides.get(name)
             if new is None:
+                new = defaults.get(name)
+            if new is None:
                 new = entry[1][src_idx]
             entry[1] = np.concatenate([entry[1], np.asarray(new, entry[1].dtype)], axis=0)
-        self.n += len(src_idx)
+        self.n += m
+
+    def append_rows(self, rows):
+        """Append whole rows from another splat set ({name: [data_type, array]}), as originals."""
+        m = len(rows["position"][1]) if "position" in rows else 0
+        if m == 0:
+            return
+        for name, entry in self.arrays.items():
+            if name in rows:
+                new = rows[name][1]
+            else:
+                new = np.zeros((m,) + entry[1].shape[1:], entry[1].dtype)
+            if name in (ADDED_ATTR, FADED_ATTR, SELECT_ATTR):
+                new = np.zeros((m, 1), bool)
+            entry[1] = np.concatenate([entry[1], np.asarray(new, entry[1].dtype)], axis=0)
+        self.n += m
+
+    def rows(self, mask):
+        return {name: [dt, arr[mask].copy()] for name, (dt, arr) in self.arrays.items()}
+
+
+def concat_rows(parts):
+    """Stack a list of {name: [data_type, array]} into one, filling missing attributes with zeros."""
+    parts = [p for p in parts if p and len(p["position"][1])]
+    if not parts:
+        return None
+    names = {}
+    for p in parts:
+        for name, (dt, arr) in p.items():
+            names.setdefault(name, (dt, arr.shape[1:], arr.dtype))
+    out = {}
+    for name, (dt, shape, dtype) in names.items():
+        chunks = []
+        for p in parts:
+            m = len(p["position"][1])
+            chunks.append(p[name][1] if name in p else np.zeros((m,) + shape, dtype))
+        out[name] = [dt, np.concatenate(chunks, axis=0)]
+    return out
+
+
+def set_from_rows(rows):
+    n = len(rows["position"][1]) if rows else 0
+    return SplatSet(n, {k: [dt, arr] for k, (dt, arr) in (rows or {}).items()})
 
 
 def major_axes(S, sigmas=2.0):

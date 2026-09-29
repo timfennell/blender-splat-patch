@@ -5,7 +5,7 @@ import numpy as np
 from bpy_extras.io_utils import ExportHelper
 from mathutils import Vector
 
-from . import core, view
+from . import core, view, stash
 from .splats import SplatSet, is_splat_object, major_axes, SELECT_ATTR
 from .ply_io import write_splat_ply
 
@@ -16,6 +16,8 @@ TOOL_ITEMS = [
     ('HEAL', "Heal", "Healing brush: clone, then match the colour of the destination", 'MOD_SMOOTH', 3),
     ('SPOT', "Spot Heal", "Paint over a blemish; it is regrown from its surroundings", 'SHADERFX', 4),
     ('BRIDGE', "Bridge", "Paint over an empty hole to continue the surface across it", 'MOD_SOLIDIFY', 5),
+    ('RESTORE', "Restore", "Paint to undo edits locally: bring back erased splats and/or remove added ones",
+     'RECOVER_LAST', 6),
 ]
 
 _REV_KEY = "gsp_revision"
@@ -25,9 +27,10 @@ STATE = {"running": False}
 
 PAINT_TOOLS = {'ERASE', 'SELECT', 'SPOT'}
 # Tools that can start and continue a stroke with nothing solid under the mouse.
-FREE_TOOLS = PAINT_TOOLS | {'BRIDGE'}
+FREE_TOOLS = PAINT_TOOLS | {'BRIDGE', 'RESTORE'}
 
 HELP = {
+    'RESTORE': "LMB restore · green = added by edits, red = erased, yellow = faded",
     'BRIDGE': "LMB paint over the hole, a little onto the intact surface around it",
     'ERASE': "LMB paint erase",
     'SELECT': "LMB select · Ctrl+LMB deselect",
@@ -47,9 +50,15 @@ def bump_revision(obj):
     return rev
 
 
+def save(obj, S):
+    """Write splats back; original splats removed since the last save go to the stash."""
+    S.write(obj.data)
+    stash.push(obj, S)
+
+
 def commit(context, obj, S, message):
     """Write splats back and record an undo step."""
-    S.write(obj.data)
+    save(obj, S)
     rev = bump_revision(obj)
     obj.data.update_tag()
     for area in context.screen.areas if context.screen else ():
@@ -125,6 +134,7 @@ class GSP_OT_brush(bpy.types.Operator):
     def load(self):
         self.S = core_S = SplatSet.read(self.obj.data)
         self.axes = major_axes(core_S)
+        self.T = stash.read(self.obj)       # erased originals, for the restore brush
         self.rev = int(self.obj.data.get(_REV_KEY, 0))
         self.ptr = self.obj.data.as_pointer()
         return core_S
@@ -133,7 +143,7 @@ class GSP_OT_brush(bpy.types.Operator):
         p = props_of(context)
         context.workspace.status_text_set(
             f"Splat {p.tool.title()}:  {HELP[p.tool]} · [ ] radius · Shift+[ ] feather · "
-            f"X surface/through · 1-6 tools · Esc/Enter done")
+            f"X surface/through · 1-7 tools · Esc/Enter done")
 
     def finish(self, context):
         if self._handle:
@@ -188,6 +198,8 @@ class GSP_OT_brush(bpy.types.Operator):
         feather = p.feather
         if p.tool == 'BRIDGE':
             self.bridge_centres.append((mx, my))
+        elif p.tool == 'RESTORE':
+            self.restore_dab(context, mx, my)
         elif p.tool in PAINT_TOOLS:
             # Through mode, or nothing solid under the mouse (wisps in empty space):
             # take everything under the brush circle at any depth.
@@ -245,7 +257,7 @@ class GSP_OT_brush(bpy.types.Operator):
 
         if event.value == 'PRESS' and self.stroke is None:
             tools = {'ONE': 'ERASE', 'TWO': 'SELECT', 'THREE': 'CLONE', 'FOUR': 'HEAL', 'FIVE': 'SPOT',
-                     'SIX': 'BRIDGE'}
+                     'SIX': 'BRIDGE', 'SEVEN': 'RESTORE'}
             if event.type in tools:
                 p.tool = tools[event.type]
                 self.status(context)
@@ -289,6 +301,9 @@ class GSP_OT_brush(bpy.types.Operator):
                         self.offset = self.hit - src
                 self.stroke = core.Stroke(self.S)
                 self.bridge_centres = []
+                self.rs_remove = np.zeros(self.S.n, bool)
+                self.rs_unfade = np.zeros(self.S.n, bool)
+                self.rs_restore = np.zeros(0 if self.T is None else self.T.n, bool)
                 self.stroke_ctrl = event.ctrl
                 self.last_dab = None
                 self.dab(context, mx, my, event.ctrl)
@@ -314,6 +329,8 @@ class GSP_OT_brush(bpy.types.Operator):
                 self.rev = commit(context, self.obj, S, "Splat select")
             elif p.tool == 'BRIDGE':
                 self.end_bridge(context)
+            elif p.tool == 'RESTORE':
+                self.end_restore(context)
             elif p.tool == 'SPOT':
                 if not st.hole.any():
                     return
@@ -332,7 +349,46 @@ class GSP_OT_brush(bpy.types.Operator):
             raise
         self.ptr = self.obj.data.as_pointer()
         self.axes = major_axes(self.S)
+        self.T = stash.read(self.obj)
         self.proj.key = None
+
+    def restore_dab(self, context, mx, my):
+        """Mark added splats to remove and erased/faded splats to bring back, under the brush."""
+        p = props_of(context)
+        S, T, r = self.S, self.T, float(p.radius_px)
+        surface = p.depth_mode == 'SURFACE' and self.hit is not None
+        if surface:
+            idx, w = core.sphere_hits(S.pos, self.hit, self.radius, p.feather)
+        else:
+            idx, d = self.proj.disc(mx, my, r)
+            w = core.feather_weight(d, r, p.feather)
+        idx = idx[w > 0.5]
+        if p.remove_added:
+            self.rs_remove[idx[S.added[idx]]] = True
+        if p.restore_erased:
+            self.rs_unfade[idx[S.faded[idx]]] = True
+            if T is not None and T.n:
+                # Erased splats are gone from the surface, so pick them on screen, but
+                # not ones hidden behind the surface the brush is on.
+                sx, sy, ok = self.proj.project(T.pos)
+                d = np.hypot(sx - mx, sy - my)
+                m = ok & (core.feather_weight(d, r, p.feather) > 0.5)
+                if surface:
+                    V = np.array(self.rv3d.view_matrix @ self.obj.matrix_world, np.float32)
+                    tdepth = -(T.pos @ V[2, :3] + V[2, 3])
+                    hdepth = -(self.hit @ V[2, :3] + V[2, 3])
+                    m &= tdepth <= hdepth + self.radius
+                self.rs_restore |= m
+
+    def end_restore(self, context):
+        back, unfaded, removed = core.apply_restore(self.S, self.T, self.rs_remove, self.rs_unfade,
+                                                    self.rs_restore)
+        if not (back or unfaded or removed):
+            return
+        if back:
+            stash.write(self.obj, self.T)
+        self.report({'INFO'}, f"Restored {back} erased, {unfaded} faded; removed {removed} added")
+        self.rev = commit(context, self.obj, self.S, "Splat restore")
 
     def end_bridge(self, context):
         """Fit the intact surface around the painted hole and grow splats across it."""
@@ -443,6 +499,8 @@ class GSP_OT_brush(bpy.types.Operator):
         st = self.stroke
         tool = p.tool
 
+        if tool == 'RESTORE':
+            self.draw_restore(ov, p, st)
         if st is not None and tool == 'SELECT':
             idx = np.nonzero(st.select)[0]
             if len(idx):
@@ -475,8 +533,8 @@ class GSP_OT_brush(bpy.types.Operator):
             R = self.radius
             n = self.hit_normal
             col = {'ERASE': (1.0, 0.3, 0.3), 'SELECT': (1.0, 0.6, 0.1), 'CLONE': (0.3, 0.9, 0.4),
-                   'HEAL': (0.3, 0.9, 0.8), 'SPOT': (1.0, 0.3, 0.9)}[tool]
-            if p.depth_mode == 'THROUGH' and tool in {'ERASE', 'SELECT', 'SPOT'}:
+                   'HEAL': (0.3, 0.9, 0.8), 'SPOT': (1.0, 0.3, 0.9), 'RESTORE': (1.0, 1.0, 1.0)}[tool]
+            if p.depth_mode == 'THROUGH' and tool in {'ERASE', 'SELECT', 'SPOT', 'RESTORE'}:
                 n = -self.view_dir
             ov.rings.append((self.hit, n, R, (*col, 1.0), 2.0))
             if p.feather > 0:
@@ -493,6 +551,30 @@ class GSP_OT_brush(bpy.types.Operator):
             ov.rings.append((src, (0, 0, 1), 0.02, (0.3, 0.6, 1.0, 0.9), 2.0))
         ov.draw()
 
+    def draw_restore(self, ov, p, st):
+        S, T = self.S, self.T
+        layers = []
+        if p.restore_erased:
+            if T is not None and T.n:
+                marked = self.rs_restore if st is not None else np.zeros(T.n, bool)
+                layers.append((T.pos[~marked], (1.0, 0.25, 0.25, 0.85)))
+                layers.append((T.pos[marked], (1.0, 1.0, 1.0, 0.95)))
+            faded = S.faded
+            if faded.any():
+                marked = self.rs_unfade if st is not None else np.zeros(S.n, bool)
+                layers.append((S.pos[faded & ~marked], (1.0, 0.8, 0.2, 0.85)))
+                layers.append((S.pos[faded & marked], (1.0, 1.0, 1.0, 0.95)))
+        if p.remove_added:
+            added = S.added
+            if added.any():
+                marked = self.rs_remove if st is not None else np.zeros(S.n, bool)
+                layers.append((S.pos[added & ~marked], (0.2, 1.0, 0.4, 0.85)))
+                layers.append((S.pos[added & marked], (0.3, 0.3, 0.3, 0.9)))
+        for pos, col in layers:
+            if len(pos):
+                pos, rgba = view.cap(pos, view.solid_rgba(len(pos), col))
+                ov.points.append((pos, rgba, 2.0))
+
     def draw_overlay_px(self):
         # Screen circle when nothing solid is under the mouse, so the brush is
         # still visible (and usable) over wisps in empty space.
@@ -508,7 +590,7 @@ class GSP_OT_brush(bpy.types.Operator):
                 view.draw_screen_ring(self.mouse[0], self.mouse[1], p.radius_px * (1 + p.bridge_rim),
                                       (0.3, 0.8, 1.0, 0.35))
                 return
-            if self.hit is not None or p.tool not in PAINT_TOOLS:
+            if self.hit is not None or p.tool not in PAINT_TOOLS | {'RESTORE'}:
                 return
             view.draw_screen_ring(self.mouse[0], self.mouse[1], p.radius_px, (1.0, 1.0, 1.0, 0.7))
             if p.feather > 0:
@@ -578,7 +660,7 @@ class GSP_OT_select_all(_SplatOp, bpy.types.Operator):
             sel[:] = False
         else:
             sel[:] = ~sel
-        S.write(obj.data)
+        save(obj, S)
         bump_revision(obj)
         return {'FINISHED'}
 
@@ -594,7 +676,7 @@ class GSP_OT_select_faint(_SplatOp, bpy.types.Operator):
         S = SplatSet.read(obj.data)
         m = S.opacity < self.threshold
         S.selected[m] = True
-        S.write(obj.data)
+        save(obj, S)
         bump_revision(obj)
         self.report({'INFO'}, f"Selected {int(m.sum())} faint splats")
         return {'FINISHED'}
@@ -612,7 +694,7 @@ class GSP_OT_select_floaters(_SplatOp, bpy.types.Operator):
         scale = sum(abs(s) for s in obj.matrix_world.to_scale()) / 3.0
         m, cell = core.floater_mask(S, p.floater_gap / max(scale, 1e-12), p.floater_keep)
         S.selected[m] = True
-        S.write(obj.data)
+        save(obj, S)
         bump_revision(obj)
         self.report({'INFO'}, f"Selected {int(m.sum())} floating splats (gap {cell * scale:.4g})")
         return {'FINISHED'}
@@ -631,7 +713,7 @@ class GSP_OT_select_cursor_sphere(_SplatOp, bpy.types.Operator):
         scale = sum(abs(s) for s in obj.matrix_world.to_scale()) / 3.0
         m = np.linalg.norm(S.pos - c, axis=1) < p.cursor_radius / max(scale, 1e-12)
         S.selected[m] = True
-        S.write(obj.data)
+        save(obj, S)
         bump_revision(obj)
         self.report({'INFO'}, f"Selected {int(m.sum())} splats")
         return {'FINISHED'}
@@ -650,7 +732,7 @@ class GSP_OT_delete_selected(_SplatOp, bpy.types.Operator):
             self.report({'WARNING'}, "No splats selected")
             return {'CANCELLED'}
         S.keep(~m)
-        S.write(obj.data)
+        save(obj, S)
         bump_revision(obj)
         self.report({'INFO'}, f"Deleted {int(m.sum())} splats")
         return {'FINISHED'}
@@ -683,7 +765,7 @@ class GSP_OT_fill_selected(_SplatOp, bpy.types.Operator):
         if removed == 0 and added == 0:
             self.report({'WARNING'}, msg)
             return {'CANCELLED'}
-        S.write(obj.data)
+        save(obj, S)
         bump_revision(obj)
         self.report({'INFO'}, f"{msg}: removed {removed}, added {added}")
         return {'FINISHED'}

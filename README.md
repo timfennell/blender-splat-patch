@@ -22,7 +22,7 @@ Pick a tool button to start painting. While the brush is running:
 | Ctrl+LMB | Clone/Heal: set the sample point · Select: deselect |
 | `[` `]` | brush radius · Shift: feather |
 | `X` | Surface ↔ Through depth (Through reaches every depth, e.g. a whole pin) |
-| `1`–`6` | Erase / Select / Clone / Heal / Spot Heal / Bridge |
+| `1`–`7` | Erase / Select / Clone / Heal / Spot Heal / Bridge / Restore |
 | Esc / Enter | stop the brush |
 
 MMB, the scroll wheel and trackpad gestures still navigate the view. Each stroke is one undo step.
@@ -45,6 +45,25 @@ MMB, the scroll wheel and trackpad gestures still navigate the view. Each stroke
   the rim (*Fill With: Surroundings*) or cloned from the sample point and colour-matched (*Sample*).
   Anything deeper in the hole is left alone and ends up behind the new surface. Clone and Heal then work on
   top of the bridge. *Rim Width* sets how wide a ring is read, as a multiple of the brush radius.
+
+## Restore (non-destructive edits)
+
+Edits are recorded, so any part of the model can be taken back to the original scan:
+
+- Splats that an edit removes (erase, clone's *Replace*, spot heal, fill, Delete Selected) are kept in a
+  hidden stash saved in the .blend next to the scan.
+- Splats that an edit adds are tagged, and splats that a feathered edit fades keep their original opacity.
+
+With the **Restore** brush (`7`) active, splats added by edits show **green**, erased ones **red**
+(at the place they were), and faded ones **yellow**. Paint to take the area under the brush back to the
+original. The two toggles choose what a stroke does:
+
+- **Restore Erased** brings back red splats and resets yellow ones to their original opacity.
+- **Remove Added** deletes green splats.
+
+Restoring everything returns the original scan exactly, every splat and attribute. **Export Splat PLY
+bakes the edits**: the file contains only the visible result, and the stash stays in the .blend so you
+can keep refining. Edits made before version 0.1.3 were not recorded and can't be restored.
 
 ## Selection & Fill (the sample / edit / fill volumes)
 
