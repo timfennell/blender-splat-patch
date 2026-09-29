@@ -114,9 +114,8 @@ class GSP_PT_brush(bpy.types.Panel):
         if p.tool in {'ERASE', 'SELECT', 'SPOT', 'RESTORE'}:
             col.prop(p, "depth_mode", expand=True)
         if p.tool == 'RESTORE':
-            row = col.row(align=True)
-            row.prop(p, "restore_erased", toggle=True, icon='RECOVER_LAST')
-            row.prop(p, "remove_added", toggle=True, icon='TRASH')
+            col.prop(p, "restore_erased", toggle=True, icon='RECOVER_LAST')
+            col.prop(p, "remove_added", toggle=True, icon='TRASH')
         if p.tool == 'BRIDGE':
             col.prop(p, "bridge_source", expand=True)
             col.prop(p, "bridge_rim")

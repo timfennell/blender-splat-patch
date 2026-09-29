@@ -6,6 +6,15 @@ dust, stray hairs, and the pin and the hole it leaves.
 
 Sidebar: **3D Viewport > N > Splat Patch**.
 
+| Pinned specimen as scanned | Pin and stray splats removed, holes bridged |
+|---|---|
+| ![Before: bee scan with the pin through it](docs/images/pin_before.jpg) | ![After: the same view with the pin removed](docs/images/pin_after.jpg) |
+
+![Blender with the Splat Patch sidebar](docs/images/overview.jpg)
+
+**Tip:** splats look much darker than they really are in Blender's default Solid lighting. In the
+viewport's **Viewport Shading** dropdown, set **Lighting → Flat** to see the scan's true colours while editing.
+
 ## Install
 
 Download `gs_patch-*.zip` from [Releases](https://github.com/timfennell/blender-splat-patch/releases),
@@ -32,12 +41,16 @@ MMB, the scroll wheel and trackpad gestures still navigate the view. Each stroke
   circle at any depth. Needle-shaped splats count wherever their length crosses the brush, not just at
   their centre.
 - **Select**: paints a region to use with the Selection & Fill buttons.
+![Clone stamp mid-stroke: the blue ring is the sample point, the green ring the brush](docs/images/clone.jpg)
+
 - **Clone**: works like Photoshop's clone stamp. Ctrl+click a clean area, then paint over the defect. The splats
   are rotated to fit the target surface's normal, including their view-dependent colour (SH bands 1–3),
   so highlights and sheen turn with the surface. *Aligned* keeps the offset between strokes.
   *Replace Destination* removes what was there, crossfading across the feather.
 - **Heal**: clones like Clone, then shifts the colour to match the ring around the destination.
 - **Spot Heal**: paint over a speck; it is deleted and new splats are grown from the surrounding surface.
+![Painting a bridge over the hole the pin left](docs/images/bridge.jpg)
+
 - **Bridge**: for a hole that is already empty (e.g. after erasing a pin). Look at the hole and paint over
   it, a little onto the intact surface around it. The tool reads the surface in a rim around what you
   painted, keeping only the layer at the hole's edge (not the inside of the hole, or a leg or wing crossing
@@ -53,6 +66,8 @@ Edits are recorded, so any part of the model can be taken back to the original s
 - Splats that an edit removes (erase, clone's *Replace*, spot heal, fill, Delete Selected) are kept in a
   hidden stash saved in the .blend next to the scan.
 - Splats that an edit adds are tagged, and splats that a feathered edit fades keep their original opacity.
+
+![Restore brush: the removed pin shows red, bridged and cloned patches green](docs/images/restore.jpg)
 
 With the **Restore** brush (`7`) active, splats added by edits show **green**, erased ones **red**
 (at the place they were), and faded ones **yellow**. Paint to take the area under the brush back to the
