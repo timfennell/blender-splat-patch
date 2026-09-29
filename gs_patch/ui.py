@@ -152,7 +152,7 @@ class GSP_PT_selection(bpy.types.Panel):
         layout.operator("gsp.delete_selected", icon='TRASH')
         col = layout.column(align=True)
         col.operator("gsp.fill_selected", text="Fill From Surroundings", icon='SHADERFX').method = 'SURROUND'
-        col.operator("gsp.fill_selected", text="Fill From Sample", icon='BRUSH_CLONE').method = 'SOURCE'
+        col.operator("gsp.fill_selected", text="Fill From Sample", icon='DUPLICATE').method = 'SOURCE'
 
 
 class GSP_PT_heal(bpy.types.Panel):

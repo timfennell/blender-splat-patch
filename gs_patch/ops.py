@@ -12,8 +12,8 @@ from .ply_io import write_splat_ply
 TOOL_ITEMS = [
     ('ERASE', "Erase", "Paint to delete splats (dust, hairs, pins)", 'TRASH', 0),
     ('SELECT', "Select", "Paint a region to erase or fill later (Ctrl: deselect)", 'RESTRICT_SELECT_OFF', 1),
-    ('CLONE', "Clone", "Clone stamp: Ctrl+click sets the sample point, then paint", 'BRUSH_CLONE', 2),
-    ('HEAL', "Heal", "Healing brush: clone, then match the colour of the destination", 'BRUSH_SOFTEN', 3),
+    ('CLONE', "Clone", "Clone stamp: Ctrl+click sets the sample point, then paint", 'DUPLICATE', 2),
+    ('HEAL', "Heal", "Healing brush: clone, then match the colour of the destination", 'MOD_SMOOTH', 3),
     ('SPOT', "Spot Heal", "Paint over a blemish; it is regrown from its surroundings", 'SHADERFX', 4),
 ]
 
@@ -103,6 +103,11 @@ class GSP_OT_brush(bpy.types.Operator):
         self.offset = None          # clone: destination - source, in object space
         self.stroke_src_start = None
         self.last_draw = 0.0
+        # The orange object outline would hide the selection overlay; restore it on exit.
+        self.overlay_settings = context.space_data.overlay
+        self.had_outline = self.overlay_settings.show_outline_selected
+        self.overlay_settings.show_outline_selected = False
+        self.shown_tool = None
         self._handle = bpy.types.SpaceView3D.draw_handler_add(self.draw_overlay, (), 'WINDOW', 'POST_VIEW')
         context.window_manager.modal_handler_add(self)
         STATE["running"] = True
@@ -126,6 +131,10 @@ class GSP_OT_brush(bpy.types.Operator):
             bpy.types.SpaceView3D.draw_handler_remove(self._handle, 'WINDOW')
             self._handle = None
         STATE["running"] = False
+        try:
+            self.overlay_settings.show_outline_selected = self.had_outline
+        except ReferenceError:
+            pass
         context.workspace.status_text_set(None)
         self.area.tag_redraw()
 
@@ -190,12 +199,16 @@ class GSP_OT_brush(bpy.types.Operator):
     # ---------------------------------------------------------- modal
     def modal(self, context, event):
         p = props_of(context)
-        if not STATE["running"] or context.active_object is not self.obj \
-                or not is_splat_object(self.obj):
+        active = context.active_object
+        if not STATE["running"] or active is None \
+                or active.as_pointer() != self.obj.as_pointer() or not is_splat_object(self.obj):
             self.finish(context)
             return {'CANCELLED'}
         if self.stroke is None and self.stale():
             self.load()
+        if p.tool != self.shown_tool:
+            self.shown_tool = p.tool
+            self.status(context)
         self.area.tag_redraw()
 
         x, y = event.mouse_x, event.mouse_y
@@ -379,7 +392,7 @@ class _SplatOp:
 
     @classmethod
     def poll(cls, context):
-        return active_splats(context) is not None and not STATE["running"]
+        return active_splats(context) is not None
 
 
 class GSP_OT_select_all(_SplatOp, bpy.types.Operator):
