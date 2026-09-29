@@ -256,6 +256,10 @@ class GSP_OT_brush(bpy.types.Operator):
             else:
                 idx, w = core.sphere_hits_S(S, self.hit, self.radius, feather, self.axes,
                                             self.reach_cap, self.long_idx)
+            # Already-erased splats are hidden in place; leave them out, so repainting
+            # a cleaned area doesn't mark (and preview) them again.
+            live = S.visible[idx]
+            idx, w = idx[live], w[live]
             if p.tool == 'ERASE':
                 st.erase(idx, w, p.strength)
             elif p.tool == 'SELECT':
@@ -624,7 +628,7 @@ class GSP_OT_brush(bpy.types.Operator):
 
         if st is not None:
             if tool == 'ERASE':
-                idx = np.nonzero(st.factor < 0.999)[0]
+                idx = np.nonzero((st.factor < 0.999) & S.visible)[0]
                 if len(idx):
                     a = 1.0 - st.factor[idx]
                     rgba = np.column_stack([np.ones_like(a), 0.15 * np.ones_like(a),

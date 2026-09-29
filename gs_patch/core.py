@@ -301,7 +301,8 @@ class Stroke:
         S = self.S
         if replace:
             idx, w = sphere_hits(S.pos, cd, radius, feather, cand=S.near(cd, radius))
-            self.erase(idx, w)
+            live = S.visible[idx]
+            self.erase(idx[live], w[live])
         idx, w = sphere_hits(S.pos, cs, radius, feather, cand=S.near(cs, radius))
         fresh = ~self.used_src[idx] & S.visible[idx]
         idx, w = idx[fresh], w[fresh]
