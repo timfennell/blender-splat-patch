@@ -6,9 +6,9 @@ dust, stray hairs, and the pin and the hole it leaves.
 
 Sidebar: **3D Viewport > N > Splat Patch**.
 
-| Pinned specimen as scanned | Pin and stray splats removed, holes bridged |
+| Top of the thorax as scanned, with the pin | Pin erased, strays removed, hole bridged |
 |---|---|
-| ![Before: bee scan with the pin through it](docs/images/pin_before.jpg) | ![After: the same view with the pin removed](docs/images/pin_after.jpg) |
+| ![Before: the pin entering the top of the bee's thorax](docs/images/pin_before.jpg) | ![After: the same view with the pin gone and the surface continued across the hole](docs/images/pin_after.jpg) |
 
 ![Blender with the Splat Patch sidebar](docs/images/overview.jpg)
 
