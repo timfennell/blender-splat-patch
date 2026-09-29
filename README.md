@@ -114,8 +114,8 @@ the original file exactly. Positions are written in object space (the object tra
 - **Bridge rebuilds one surface layer.** Where the gap was thick with hair, the bridged patch can look
   smoother than its surroundings; a pass of Clone or Heal from a hairy area on top blends it in.
 - **Restore only knows edits made with version 0.1.3 or later.** Earlier edits are permanent.
-- **Tested on insect scans from Brush.** Scans from other trainers should work, since the PLY layout is
-  standard, but haven't been tried.
+- **Tested on three bee scans:** standard 3DGS PLY files (one exported from Brush), up to 135k splats,
+  plus a 2-million-splat test file. Other trainers' standard PLYs should load the same way.
 
 ## Development
 
