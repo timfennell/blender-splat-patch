@@ -26,6 +26,23 @@ _REV_KEY = "gsp_revision"
 STATE = {"running": False}
 
 PAINT_TOOLS = {'ERASE', 'SELECT', 'SPOT'}
+
+# Tool keys while the brush runs: numbers in panel order, plus Photoshop-style letters.
+TOOL_KEYS = {'ONE': 'ERASE', 'TWO': 'SELECT', 'THREE': 'CLONE', 'FOUR': 'HEAL', 'FIVE': 'SPOT',
+             'SIX': 'BRIDGE', 'SEVEN': 'RESTORE',
+             'E': 'ERASE', 'S': 'SELECT', 'C': 'CLONE', 'H': 'HEAL', 'J': 'SPOT', 'B': 'BRIDGE',
+             'R': 'RESTORE'}
+
+SHORTCUTS = [
+    ("E  S  C  H  J  B  R", "Erase, Select, Clone, Heal, Spot Heal, Bridge, Restore (or 1-7)"),
+    ("F", "Resize the brush: move, then click or F to set"),
+    ("Shift F", "Set the feather the same way"),
+    ("[   ]", "Smaller / larger brush (Shift: feather)"),
+    ("Delete", "Erase the selected splats"),
+    ("X", "Surface / Through depth"),
+    ("Ctrl click", "Clone/Heal: set sample · Select: deselect"),
+    ("Esc  Enter", "Stop the brush"),
+]
 # Tools that can start and continue a stroke with nothing solid under the mouse.
 FREE_TOOLS = PAINT_TOOLS | {'BRIDGE', 'RESTORE'}
 
@@ -123,6 +140,11 @@ class GSP_OT_brush(bpy.types.Operator):
         self.overlay_settings = context.space_data.overlay
         self.had_outline = self.overlay_settings.show_outline_selected
         self.overlay_settings.show_outline_selected = False
+        # Splats look dark under Solid mode's studio lighting; show their real colours.
+        shading = context.space_data.shading
+        if shading.type == 'SOLID':
+            shading.light = 'FLAT'
+        self.resizing = None
         self.shown_tool = None
         self._handle = bpy.types.SpaceView3D.draw_handler_add(self.draw_overlay, (), 'WINDOW', 'POST_VIEW')
         self._handle_px = bpy.types.SpaceView3D.draw_handler_add(self.draw_overlay_px, (), 'WINDOW', 'POST_PIXEL')
@@ -164,8 +186,8 @@ class GSP_OT_brush(bpy.types.Operator):
     def status(self, context):
         p = props_of(context)
         context.workspace.status_text_set(
-            f"Splat {p.tool.title()}:  {HELP[p.tool]} · [ ] radius · Shift+[ ] feather · "
-            f"X surface/through · 1-7 tools · Esc/Enter done")
+            f"Splat {p.tool.title()}:  {HELP[p.tool]} · E S C H J B R tools · F size · Shift+F feather · "
+            f"Del erase selection · X surface/through · Esc done")
 
     def finish(self, context):
         if self._handle:
@@ -265,7 +287,7 @@ class GSP_OT_brush(bpy.types.Operator):
         self.area.tag_redraw()
 
         # Esc/Enter stop the brush wherever the mouse is (e.g. over the sidebar).
-        if event.type in {'ESC', 'RET', 'NUMPAD_ENTER'} and event.value == 'PRESS':
+        if event.type in {'ESC', 'RET', 'NUMPAD_ENTER'} and event.value == 'PRESS' and self.resizing is None:
             if self.stroke is not None:
                 self.end_stroke(context)
             self.finish(context)
@@ -281,16 +303,24 @@ class GSP_OT_brush(bpy.types.Operator):
         mx, my = self.mouse_local(event)
         self.mouse = (mx, my)
 
+        if self.resizing is not None:
+            return self.modal_resize(context, event, mx, my)
+
         if event.type == 'Z' and (event.ctrl or event.oskey) and event.value == 'PRESS':
             self.report({'INFO'}, "Undo is off while painting: use the Restore brush (7)")
             return {'RUNNING_MODAL'}
 
         if event.value == 'PRESS' and self.stroke is None:
-            tools = {'ONE': 'ERASE', 'TWO': 'SELECT', 'THREE': 'CLONE', 'FOUR': 'HEAL', 'FIVE': 'SPOT',
-                     'SIX': 'BRIDGE', 'SEVEN': 'RESTORE'}
-            if event.type in tools:
-                p.tool = tools[event.type]
+            plain = not (event.ctrl or event.alt or event.oskey)
+            if event.type in TOOL_KEYS and plain and not event.shift:
+                p.tool = TOOL_KEYS[event.type]
                 self.status(context)
+                return {'RUNNING_MODAL'}
+            if event.type == 'F' and plain:
+                self.start_resize(context, mx, my, 'FEATHER' if event.shift else 'RADIUS')
+                return {'RUNNING_MODAL'}
+            if event.type in {'DEL', 'BACK_SPACE'} and plain:
+                self.delete_selection(context)
                 return {'RUNNING_MODAL'}
             if event.type in {'LEFT_BRACKET', 'RIGHT_BRACKET'}:
                 grow = 1.15 if event.type == 'RIGHT_BRACKET' else 1 / 1.15
@@ -383,6 +413,52 @@ class GSP_OT_brush(bpy.types.Operator):
         self.ptr = self.obj.data.as_pointer()
         self.refresh_axes()
         self.T = stash.read(self.obj)
+        self.proj.key = None
+        self.edited = True
+
+    # ---------------------------------------------------------- shortcuts
+    def start_resize(self, context, mx, my, kind):
+        """Blender-style F resize: the circle stays put and follows the mouse's distance."""
+        p = props_of(context)
+        r = float(p.radius_px)
+        if kind == 'RADIUS':
+            centre = (mx - r, my)
+        else:
+            centre = (mx - r * (1.0 - p.feather), my)
+        self.resizing = dict(kind=kind, centre=centre, radius=p.radius_px, feather=p.feather)
+        context.workspace.status_text_set(
+            f"Move to set the brush {'size' if kind == 'RADIUS' else 'feather'} · click or F to confirm · "
+            f"Esc or right-click to cancel")
+
+    def modal_resize(self, context, event, mx, my):
+        p = props_of(context)
+        rs = self.resizing
+        d = float(np.hypot(mx - rs["centre"][0], my - rs["centre"][1]))
+        if event.type == 'MOUSEMOVE':
+            if rs["kind"] == 'RADIUS':
+                p.radius_px = int(min(1000, max(3, round(d))))
+            else:
+                p.feather = float(min(1.0, max(0.0, 1.0 - d / max(p.radius_px, 1))))
+            return {'RUNNING_MODAL'}
+        if event.value == 'PRESS' and event.type in {'LEFTMOUSE', 'F', 'RET', 'NUMPAD_ENTER', 'SPACE'}:
+            self.resizing = None
+            self.status(context)
+            return {'RUNNING_MODAL'}
+        if event.value == 'PRESS' and event.type in {'RIGHTMOUSE', 'ESC'}:
+            p.radius_px, p.feather = rs["radius"], rs["feather"]
+            self.resizing = None
+            self.status(context)
+            return {'RUNNING_MODAL'}
+        return {'RUNNING_MODAL'}
+
+    def delete_selection(self, context):
+        S = self.S
+        n = S.hide(S.selected.copy())
+        if n == 0:
+            self.report({'INFO'}, "Nothing selected to erase")
+            return
+        self.report({'INFO'}, f"Erased {n} selected splats")
+        self.rev = commit(context, self.obj, S, "Splat delete", only=OPACITY_COLUMNS + (SELECT_ATTR,))
         self.proj.key = None
         self.edited = True
 
@@ -621,6 +697,12 @@ class GSP_OT_brush(bpy.types.Operator):
             if area is None or area.as_pointer() != self.area.as_pointer():
                 return
             p = bpy.context.scene.gsp
+            if self.resizing is not None:
+                cx, cy = self.resizing["centre"]
+                view.draw_screen_ring(cx, cy, p.radius_px, (1.0, 1.0, 1.0, 0.95), 2.0)
+                if p.feather > 0:
+                    view.draw_screen_ring(cx, cy, p.radius_px * (1 - p.feather), (1.0, 1.0, 1.0, 0.45))
+                return
             if p.tool == 'BRIDGE':
                 if self.stroke is not None:
                     view.draw_screen_discs(self.bridge_centres, p.radius_px, (0.3, 0.8, 1.0, 0.25))

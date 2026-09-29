@@ -1,6 +1,6 @@
 import bpy
 
-from .ops import TOOL_ITEMS, STATE
+from .ops import TOOL_ITEMS, STATE, SHORTCUTS
 from .splats import is_splat_object
 
 
@@ -211,6 +211,24 @@ class GSP_PT_heal(bpy.types.Panel):
         col.prop(p, "heal_strength", slider=True)
 
 
+class GSP_PT_shortcuts(bpy.types.Panel):
+    bl_label = "Shortcuts"
+    bl_parent_id = "GSP_PT_panel"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Splat Patch"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        col = self.layout.column(align=True)
+        col.label(text="While the brush is running:")
+        for keys, what in SHORTCUTS:
+            row = col.row()
+            split = row.split(factor=0.34)
+            split.label(text=keys)
+            split.label(text=what)
+
+
 class GSP_PT_export(bpy.types.Panel):
     bl_label = "Export"
     bl_parent_id = "GSP_PT_panel"
@@ -227,4 +245,4 @@ class GSP_PT_export(bpy.types.Panel):
 
 
 classes = (GSP_Props, GSP_PT_panel, GSP_PT_brush, GSP_PT_sample, GSP_PT_selection,
-           GSP_PT_heal, GSP_PT_export)
+           GSP_PT_heal, GSP_PT_shortcuts, GSP_PT_export)

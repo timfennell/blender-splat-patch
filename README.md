@@ -40,11 +40,17 @@ Pick a tool button to start painting. While the brush is running:
 | Key | Action |
 |---|---|
 | LMB drag | paint with the current tool |
+| **E** **S** **C** **H** **J** **B** **R** | Erase, Select, Clone, Heal, Spot Heal, Bridge, Restore (or `1`–`7`) |
+| **F** | resize the brush: move the mouse, then click or F to set (Esc / right-click cancels) |
+| **Shift F** | set the feather the same way |
+| `[` `]` | smaller / larger brush · Shift: feather |
+| **Delete** / Backspace | erase the selected splats |
 | Ctrl+LMB | Clone/Heal: set the sample point · Select: deselect |
-| `[` `]` | brush radius · Shift: feather |
 | `X` | Surface ↔ Through depth (Through reaches every depth, e.g. a whole pin) |
-| `1`–`7` | Erase / Select / Clone / Heal / Spot Heal / Bridge / Restore |
 | Esc / Enter | stop the brush (works with the mouse anywhere) |
+
+Starting the brush switches Solid view to **Flat** lighting so the splats show their true colours. The
+same list is in the panel under **Shortcuts**.
 
 MMB, the scroll wheel and trackpad gestures still navigate the view. Strokes don't create Blender undo
 steps (on big scans each would copy the whole cloud): use the **Restore** brush to undo edits anywhere.
