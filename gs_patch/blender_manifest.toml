@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "gs_patch"
-version = "0.1.7"
+version = "0.1.8"
 name = "Gaussian Splat Patch"
 tagline = "Erase, clone stamp and heal Gaussian splat point clouds"
 maintainer = "Tim Fennell"

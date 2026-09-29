@@ -271,6 +271,7 @@ class Stroke:
         n = S.n
         self.factor = np.ones(n, np.float32)       # opacity multiplier on existing splats
         self.select = np.zeros(n, bool)
+        self.deselect = np.zeros(n, bool)
         self.hole = np.zeros(n, bool)
         self.used_src = np.zeros(n, bool)
         self.clone_src, self.clone_pos, self.clone_rot = [], [], []
@@ -280,6 +281,11 @@ class Stroke:
     # --- dabs
     def erase(self, idx, w, strength=1.0):
         self.factor[idx] = np.minimum(self.factor[idx], 1.0 - w * strength)
+        self.dirty = True
+
+    def mark_deselect(self, idx):
+        self.deselect[idx] = True
+        self.select[idx] = False
         self.dirty = True
 
     def mark_select(self, idx):

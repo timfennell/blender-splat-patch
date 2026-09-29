@@ -11,7 +11,7 @@ from .ply_io import write_splat_ply
 
 TOOL_ITEMS = [
     ('ERASE', "Erase", "Paint to delete splats (dust, hairs, pins)", 'TRASH', 0),
-    ('SELECT', "Select", "Paint a region to erase or fill later (Ctrl: deselect)", 'RESTRICT_SELECT_OFF', 1),
+    ('SELECT', "Select", "Paint a region to erase or fill later (hold Option/Alt to deselect)", 'RESTRICT_SELECT_OFF', 1),
     ('CLONE', "Clone", "Clone stamp: Ctrl+click sets the sample point, then paint", 'DUPLICATE', 2),
     ('HEAL', "Heal", "Healing brush: clone, then match the colour of the destination", 'MOD_SMOOTH', 3),
     ('SPOT', "Spot Heal", "Paint over a blemish; it is regrown from its surroundings", 'SHADERFX', 4),
@@ -40,7 +40,8 @@ SHORTCUTS = [
     ("[   ]", "Smaller / larger brush (Shift: feather)"),
     ("Delete", "Erase the selected splats"),
     ("X", "Surface / Through depth"),
-    ("Ctrl click", "Clone/Heal: set sample · Select: deselect"),
+    ("Option / Alt", "Select: hold while painting to deselect (Ctrl works too)"),
+    ("Ctrl click", "Clone/Heal: set the sample point"),
     ("Esc  Enter", "Stop the brush"),
 ]
 # Tools that can start and continue a stroke with nothing solid under the mouse.
@@ -50,7 +51,7 @@ HELP = {
     'RESTORE': "LMB restore · green = added by edits, red = erased, yellow = faded",
     'BRIDGE': "LMB paint over the hole, a little onto the intact surface around it",
     'ERASE': "LMB paint erase",
-    'SELECT': "LMB select · Ctrl+LMB deselect",
+    'SELECT': "LMB select · hold Option/Alt (or Ctrl) to deselect",
     'CLONE': "Ctrl+LMB set sample · LMB clone",
     'HEAL': "Ctrl+LMB set sample · LMB heal",
     'SPOT': "LMB paint over blemish",
@@ -258,7 +259,9 @@ class GSP_OT_brush(bpy.types.Operator):
             if p.tool == 'ERASE':
                 st.erase(idx, w, p.strength)
             elif p.tool == 'SELECT':
-                st.mark_select(idx[w > 0.5] if feather > 0 else idx)
+                hit = idx[w > 0.5] if feather > 0 else idx
+                # Hold Option/Alt (or Ctrl) to deselect; checked every dab, so it can change mid-stroke.
+                st.mark_deselect(hit) if ctrl else st.mark_select(hit)
             else:
                 st.mark_hole(idx[w > 0.5] if feather > 0 else idx)
         else:
@@ -339,7 +342,7 @@ class GSP_OT_brush(bpy.types.Operator):
             if self.stroke is not None and (self.hit is not None or p.tool in FREE_TOOLS):
                 spacing = max(p.radius_px * p.spacing, 1.0)
                 if self.last_dab is None or np.hypot(mx - self.last_dab[0], my - self.last_dab[1]) >= spacing:
-                    self.dab(context, mx, my, event.ctrl)
+                    self.dab(context, mx, my, event.ctrl or event.alt)
             return {'RUNNING_MODAL'}
 
         if event.type == 'LEFTMOUSE':
@@ -364,9 +367,9 @@ class GSP_OT_brush(bpy.types.Operator):
                 self.rs_remove = np.zeros(self.S.n, bool)
                 self.rs_unfade = np.zeros(self.S.n, bool)
                 self.rs_restore = np.zeros(0 if self.T is None else self.T.n, bool)
-                self.stroke_ctrl = event.ctrl
+                self.stroke_ctrl = event.ctrl or event.alt
                 self.last_dab = None
-                self.dab(context, mx, my, event.ctrl)
+                self.dab(context, mx, my, event.ctrl or event.alt)
                 return {'RUNNING_MODAL'}
             if event.value == 'RELEASE' and self.stroke is not None:
                 self.end_stroke(context)
@@ -382,10 +385,8 @@ class GSP_OT_brush(bpy.types.Operator):
         self.stroke = None
         try:
             if p.tool == 'SELECT':
-                if self.stroke_ctrl:
-                    S.selected[st.select] = False
-                else:
-                    S.selected[st.select] = True
+                S.selected[st.select] = True
+                S.selected[st.deselect] = False
                 S.selected[S.hidden] = False
                 self.rev = commit(context, self.obj, S, "Splat select", only=(SELECT_ATTR,))
             elif p.tool == 'BRIDGE':
@@ -615,11 +616,11 @@ class GSP_OT_brush(bpy.types.Operator):
         if tool == 'RESTORE':
             self.draw_restore(ov, p, st)
         if st is not None and tool == 'SELECT':
-            idx = np.nonzero(st.select)[0]
-            if len(idx):
-                col = (0.35, 0.35, 0.4, 0.9) if self.stroke_ctrl else (1.0, 0.55, 0.1, 0.9)
-                pos, rgba = view.cap(S.pos[idx], view.solid_rgba(len(idx), col))
-                ov.points.append((pos, rgba, 2.0))
+            for mask, col in ((st.select, (1.0, 0.55, 0.1, 0.9)), (st.deselect, (0.35, 0.35, 0.4, 0.9))):
+                idx = np.nonzero(mask)[0]
+                if len(idx):
+                    pos, rgba = view.cap(S.pos[idx], view.solid_rgba(len(idx), col))
+                    ov.points.append((pos, rgba, 2.0))
 
         if st is not None:
             if tool == 'ERASE':

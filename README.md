@@ -39,28 +39,43 @@ Pick a tool button to start painting. While the brush is running:
 
 | Key | Action |
 |---|---|
+| **Painting** | |
 | LMB drag | paint with the current tool |
-| **E** **S** **C** **H** **J** **B** **R** | Erase, Select, Clone, Heal, Spot Heal, Bridge, Restore (or `1`–`7`) |
+| Hold **Option / Alt** (or Ctrl) | Select: deselect instead of select. Checked on every dab, so press or release it mid-stroke |
+| **Ctrl**+LMB (or Option/Alt+LMB) | Clone / Heal: set the sample point |
+| **Tools** | |
+| **E** or `1` | Erase |
+| **S** or `2` | Select |
+| **C** or `3` | Clone |
+| **H** or `4` | Heal |
+| **J** or `5` | Spot Heal |
+| **B** or `6` | Bridge |
+| **R** or `7` | Restore |
+| **Brush** | |
 | **F** | resize the brush: move the mouse, then click or F to set (Esc / right-click cancels) |
 | **Shift F** | set the feather the same way |
-| `[` `]` | smaller / larger brush · Shift: feather |
-| **Delete** / Backspace | erase the selected splats |
-| Ctrl+LMB | Clone/Heal: set the sample point · Select: deselect |
+| `[` `]` | smaller / larger brush |
+| Shift `[` `]` | less / more feather |
 | `X` | Surface ↔ Through depth (Through reaches every depth, e.g. a whole pin) |
+| **Edit** | |
+| **Delete** / Backspace | erase the selected splats |
+| **Leaving** | |
 | Esc / Enter | stop the brush (works with the mouse anywhere) |
+| Ctrl+Z / ⌘Z | blocked while painting (use Restore); after you stop, it takes back the whole brush session |
+| **View** | |
+| MMB drag, scroll wheel, trackpad | orbit, zoom and pan as usual while painting |
 
 Starting the brush switches Solid view to **Flat** lighting so the splats show their true colours. The
 same list is in the panel under **Shortcuts**.
 
-MMB, the scroll wheel and trackpad gestures still navigate the view. Strokes don't create Blender undo
-steps (on big scans each would copy the whole cloud): use the **Restore** brush to undo edits anywhere.
-Ctrl+Z is blocked while the brush runs; after you leave the brush, Ctrl+Z takes back the whole session.
+Strokes don't create Blender undo steps (on big scans each would copy the whole cloud): use the
+**Restore** brush to undo edits anywhere.
 
 - **Erase**: deletes splats; the feather fades them instead. Erase, Select and Spot Heal also work over
   empty space: with nothing solid under the brush (a white circle), they take everything under the
   circle at any depth. Needle-shaped splats count wherever their length crosses the brush, not just at
   their centre.
-- **Select**: paints a region to use with the Selection & Fill buttons.
+- **Select**: paints a region to use with the Selection & Fill buttons. Hold Option/Alt to deselect.
 ![Clone stamp mid-stroke: the blue ring is the sample point, the green ring the brush](docs/images/clone.jpg)
 
 - **Clone**: works like Photoshop's clone stamp. Ctrl+click a clean area, then paint over the defect. The splats
