@@ -12,6 +12,18 @@ Sidebar: **3D Viewport > N > Splat Patch**.
 
 ![Blender with the Splat Patch sidebar](docs/images/overview.jpg)
 
+### Retouching dust and fibres
+
+Close-ups from the same scan, same camera, before and after:
+
+| Stray fibres lying on the hair: **Erase** along them with a small brush | |
+|---|---|
+| ![Before: white fibres lying across the thorax hair](docs/images/fibre_before.jpg) | ![After: the fibres erased, hair underneath intact](docs/images/fibre_after.jpg) |
+
+| Dust on the body: **Spot Heal** over each speck | |
+|---|---|
+| ![Before: white dust specks on the dark thorax plate](docs/images/dust_before.jpg) | ![After: the specks healed from the surrounding surface](docs/images/dust_after.jpg) |
+
 **Tip:** splats look much darker than they really are in Blender's default Solid lighting. In the
 viewport's **Viewport Shading** dropdown, set **Lighting → Flat** to see the scan's true colours while editing.
 
@@ -32,7 +44,7 @@ Pick a tool button to start painting. While the brush is running:
 | `[` `]` | brush radius · Shift: feather |
 | `X` | Surface ↔ Through depth (Through reaches every depth, e.g. a whole pin) |
 | `1`–`7` | Erase / Select / Clone / Heal / Spot Heal / Bridge / Restore |
-| Esc / Enter | stop the brush |
+| Esc / Enter | stop the brush (works with the mouse anywhere) |
 
 MMB, the scroll wheel and trackpad gestures still navigate the view. Strokes don't create Blender undo
 steps (on big scans each would copy the whole cloud): use the **Restore** brush to undo edits anywhere.

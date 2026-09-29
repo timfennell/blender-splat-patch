@@ -264,6 +264,13 @@ class GSP_OT_brush(bpy.types.Operator):
             self.status(context)
         self.area.tag_redraw()
 
+        # Esc/Enter stop the brush wherever the mouse is (e.g. over the sidebar).
+        if event.type in {'ESC', 'RET', 'NUMPAD_ENTER'} and event.value == 'PRESS':
+            if self.stroke is not None:
+                self.end_stroke(context)
+            self.finish(context)
+            return {'FINISHED'}
+
         x, y = event.mouse_x, event.mouse_y
         inside = (self.region.x <= x < self.region.x + self.region.width
                   and self.region.y <= y < self.region.y + self.region.height)
@@ -273,12 +280,6 @@ class GSP_OT_brush(bpy.types.Operator):
 
         mx, my = self.mouse_local(event)
         self.mouse = (mx, my)
-
-        if event.type in {'ESC', 'RET', 'NUMPAD_ENTER'} and event.value == 'PRESS':
-            if self.stroke is not None:
-                self.end_stroke(context)
-            self.finish(context)
-            return {'FINISHED'}
 
         if event.type == 'Z' and (event.ctrl or event.oskey) and event.value == 'PRESS':
             self.report({'INFO'}, "Undo is off while painting: use the Restore brush (7)")
