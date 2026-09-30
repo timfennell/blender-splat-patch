@@ -131,6 +131,10 @@ class GSP_OT_brush(bpy.types.Operator):
         self.stroke = None
         self.hit = None
         self.hit_normal = None
+        # Set by update_hit once the mouse is over a surface; defaults so a stroke that
+        # starts over empty space or in Through mode still works.
+        self.radius = 0.0
+        self.view_dir = np.array([0.0, 0.0, -1.0], np.float32)
         self.last_dab = None
         self.stroke_ctrl = False
         self.mouse = (0, 0)
