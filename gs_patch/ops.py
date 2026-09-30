@@ -576,8 +576,25 @@ class GSP_OT_brush(bpy.types.Operator):
         near = np.nonzero(in_outer & S.visible)[0]
         toward = -view.view_vector_local(self.region, self.rv3d, cx, cy, mw)
 
+        # What counts as the hole is what the user sees: parts of the painted area that are
+        # empty or clearly deeper than the rim's surface (fitted across the screen).
+        hole = self.visible_hole(fp, inner, band, front, cid, cx, cy, r)
+        if not hole.any():
+            self.report({'INFO'}, "The surface under the painted area is intact; nothing to fill")
+            return
+
         def in_footprint(pts):
-            return fp.lookup(inner, *proj.project(pts))
+            return fp.lookup(hole, *proj.project(pts))
+
+        if p.bridge_source != 'SAMPLE':
+            added = self.view_fill(context, fp, hole, band, cx, cy)
+            if added == 0:
+                self.report({'WARNING'}, "Couldn't read the surface around the hole; paint a little onto its edge")
+                return
+            self.last_bridge = (len(ring), 0, added, "Bridged")
+            self.report({'INFO'}, f"Bridged from surroundings: +{added} splats")
+            self.rev = commit(context, self.obj, S, "Splat bridge")
+            return
 
         source = None
         if p.bridge_source == 'SAMPLE':
@@ -588,13 +605,142 @@ class GSP_OT_brush(bpy.types.Operator):
         removed, added, msg = core.bridge_fill(
             S, ring, near, in_footprint, toward, edge=edge, roughness=p.roughness, color_smooth=p.color_smooth,
             density=p.density, source=source, heal=p.heal_strength, feather=p.feather,
-            seed=int(time.time()))
+            seed=int(time.time()), footprint_is_hole=True)
         self.last_bridge = (len(ring), removed, added, msg)
         if added == 0 and removed == 0:
             self.report({'WARNING'}, msg)
             return
         self.report({'INFO'}, f"{msg}: +{added} splats")
         self.rev = commit(context, self.obj, S, "Splat bridge")
+
+    def visible_hole(self, fp, inner, band, front, cid, cx, cy, r):
+        """Screen cells of the painted area where the surface is missing, as seen from here."""
+        S, proj = self.S, self.proj
+        scale = max(r * 2.0, 1.0)
+
+        def design(x, y):
+            u, v = (x - cx) / scale, (y - cy) / scale
+            return np.stack([np.ones_like(u), u, v, u * u, u * v, v * v], 1)
+
+        cells, first = np.unique(cid, return_index=True)
+        fx, fy = proj.sx[band][first], proj.sy[band][first]
+        fd = front[cells]
+        A = design(fx, fy)
+        coef = np.array([np.median(fd), 0, 0, 0, 0, 0], np.float64)
+        m = np.ones(len(fd), bool)
+        for _ in range(6):
+            res = fd - A @ coef
+            mad = np.median(np.abs(res[m])) * 1.4826 + 1e-9
+            m = np.abs(res) < 3.0 * mad
+            if m.sum() < 12:
+                break
+            coef, *_ = np.linalg.lstsq(A[m], fd[m], rcond=None)
+        res = fd - A @ coef
+        mad = np.median(np.abs(res[m])) * 1.4826 + 1e-9
+        # Front-most splat of each painted cell (opaque ones first, any if a cell has none).
+        idx = np.nonzero(fp.lookup(inner, proj.sx, proj.sy, proj.ok) & S.visible & (S.opacity > 0.1))[0]
+        ix = np.floor(proj.sx[idx] / fp.cell).astype(int)
+        iy = np.floor(proj.sy[idx] / fp.cell).astype(int)
+        key = ix * fp.gh + iy
+        d = proj.depth[idx]
+        top = np.full(fp.gw * fp.gh, np.inf)
+        solid = S.opacity[idx] > 0.3
+        np.minimum.at(top, key[solid], d[solid])
+        anyt = np.full(fp.gw * fp.gh, np.inf)
+        np.minimum.at(anyt, key, d)
+        top = np.where(np.isfinite(top), top, anyt).reshape(fp.gw, fp.gh)
+        X, Y = fp.X, fp.Y
+        expect = (design(X.ravel(), Y.ravel()) @ coef).reshape(X.shape)
+        deep = top - expect > max(4.0 * mad, 1e-4)          # includes empty cells (inf)
+        hole = inner & deep
+        # grow by a cell so the patch overlaps the edge of the hole slightly
+        grown = hole.copy()
+        grown[1:, :] |= hole[:-1, :]; grown[:-1, :] |= hole[1:, :]
+        grown[:, 1:] |= hole[:, :-1]; grown[:, :-1] |= hole[:, 1:]
+        self._hole_fit = (design, coef, mad)
+        return grown & inner
+
+    def view_fill(self, context, fp, hole, band, cx, cy):
+        """Grow new splats over the hole cells, at the rim's depth as seen from this view.
+
+        Each new splat copies a nearby splat of the rim's surface layer (colour blended with
+        its neighbours) and keeps that donor's offset within the layer, so grain and
+        thickness carry across. Density matches the rim's surface layer per screen area.
+        """
+        from mathutils.kdtree import KDTree
+        p = props_of(context)
+        S, proj, mw = self.S, self.proj, self.obj.matrix_world
+        design, coef, mad = self._hole_fit
+        rres = proj.depth[band] - design(proj.sx[band], proj.sy[band]) @ coef
+        # How deep the rim's surface goes before it's opaque: per screen cell, walk front to
+        # back accumulating opacity; the patch copies everything down to that depth, so it
+        # gets the hair and the skin under it, not just the translucent top.
+        cid = (np.floor(proj.sx[band] / fp.cell).astype(np.int64) * fp.gh
+               + np.floor(proj.sy[band] / fp.cell).astype(np.int64))
+        order = np.lexsort((rres, cid))
+        c_s, r_s, o_s = cid[order], rres[order], S.opacity[band][order]
+        starts = np.r_[0, np.nonzero(c_s[1:] != c_s[:-1])[0] + 1]
+        cum = np.zeros(len(order))
+        logt = np.log(np.clip(1 - o_s, 1e-6, 1))
+        for s0, s1 in zip(starts, np.r_[starts[1:], len(order)]):
+            cum[s0:s1] = 1 - np.exp(np.cumsum(logt[s0:s1]))
+        opaque_at = [r_s[s0:s1][np.argmax(cum[s0:s1] >= 0.95)] for s0, s1 in zip(starts, np.r_[starts[1:], len(order)])
+                     if cum[s1 - 1] >= 0.95]
+        thick = float(np.median(opaque_at)) if opaque_at else 4 * mad
+        # never reach far past the surface: behind a thin edge the band can see the far side
+        layer = (rres > -6 * mad) & (rres <= min(max(thick, 4 * mad), 10 * mad))
+        ring, rres = band[layer], rres[layer]
+        if len(ring) < 12:
+            return 0
+        rc = np.unique(np.floor(proj.sx[ring] / fp.cell).astype(int) * fp.gh
+                       + np.floor(proj.sy[ring] / fp.cell).astype(int))
+        per_cell = len(ring) / max(len(rc), 1) * p.density
+        xs, ys = np.nonzero(hole)
+        rng = np.random.default_rng(int(time.time()))
+        counts = rng.poisson(per_cell, len(xs))
+        m = int(counts.sum())
+        if m == 0:
+            return 0
+        sx = (np.repeat(xs, counts) + rng.random(m)) * fp.cell
+        sy = (np.repeat(ys, counts) + rng.random(m)) * fp.cell
+        kd = KDTree(len(ring))
+        for i, (a, b) in enumerate(zip(proj.sx[ring], proj.sy[ring])):
+            kd.insert((a, b, 0.0), i)
+        kd.balance()
+        k = min(12, len(ring))
+        donor = np.empty(m, np.int64)
+        mean_dc = np.zeros((m, 3), np.float32)
+        base = S.base
+        for j in range(m):
+            nb = kd.find_n((sx[j], sy[j], 0.0), k)
+            ids = np.array([t[1] for t in nb])
+            w = 1.0 / (np.array([t[2] for t in nb]) + 1.0)
+            w /= w.sum()
+            donor[j] = ids[rng.choice(len(ids), p=w)]
+            if base is not None:
+                mean_dc[j] = (base[ring[ids], :3] * w[:, None]).sum(0)
+        depth = design(sx, sy) @ coef + p.roughness * rres[donor]
+        # Unproject each screen point to its view ray at that view depth (object space).
+        Pinv = np.linalg.inv(np.array(self.rv3d.perspective_matrix @ mw, np.float64))
+        V = np.array(self.rv3d.view_matrix @ mw, np.float64)
+        ndc = np.stack([sx / self.region.width * 2 - 1, sy / self.region.height * 2 - 1], 1)
+
+        def unproj(z):
+            hpt = np.concatenate([ndc, np.full((m, 1), z), np.ones((m, 1))], 1) @ Pinv.T
+            return hpt[:, :3] / hpt[:, 3:4]
+        a0, b0 = unproj(-1.0), unproj(1.0)
+        da = -(a0 @ V[2, :3] + V[2, 3])
+        db = -(b0 @ V[2, :3] + V[2, 3])
+        t = (depth - da) / np.where(np.abs(db - da) > 1e-12, db - da, 1e-12)
+        src = ring[donor]
+        overrides = {"position": (a0 + (b0 - a0) * t[:, None]).astype(np.float32),
+                     "gsp_selected": np.zeros((m, 1), bool)}
+        if base is not None:
+            nb_ = base[src].copy()
+            nb_[:, :3] = (1 - p.color_smooth) * nb_[:, :3] + p.color_smooth * mean_dc
+            overrides[core.BASE_ATTR] = nb_
+        S.append_copies(src, overrides)
+        return m
 
     def end_spot(self, context):
         """Spot Heal: clone a nearby patch over the spot and match its colour to the spot's surroundings.
@@ -955,7 +1101,7 @@ class GSP_OT_fill_selected(_SplatOp, bpy.types.Operator):
         removed, added, msg = core.heal_fill(
             S, hole, border=p.border_width, roughness=p.roughness, color_smooth=p.color_smooth,
             density=p.density, source=source, heal=p.heal_strength, feather=p.feather,
-            seed=int(time.time()))
+            seed=int(time.time()), footprint_is_hole=True)
         if removed == 0 and added == 0:
             self.report({'WARNING'}, msg)
             return {'CANCELLED'}

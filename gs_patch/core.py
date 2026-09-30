@@ -684,7 +684,8 @@ def heal_fill(S, hole_mask, border=0.0, roughness=1.0, color_smooth=0.5, density
 
 
 def bridge_fill(S, ring, near, in_footprint, toward, edge=None, roughness=1.0, color_smooth=0.5,
-                density=1.0, source=None, heal=1.0, feather=0.3, seed=0, stiffness=0.05):
+                density=1.0, source=None, heal=1.0, feather=0.3, seed=0, stiffness=0.05,
+                footprint_is_hole=False):
     """Continue the surface across an empty gap.
 
     ring        : indices of intact front-surface splats around the gap (the rim)
@@ -716,20 +717,28 @@ def bridge_fill(S, ring, near, in_footprint, toward, edge=None, roughness=1.0, c
     surf = _Surface(pos, op, ring, toward, stiffness)
     grid = _Grid(np.stack([surf.u, surf.v], 1), 2.0 * spacing)
 
-    mad = np.median(np.abs(surf.resid - np.median(surf.resid))) * 1.4826
-    tol = max(2.0 * spacing, 3.0 * mad)
     removed = 0
 
-    # Cells that already have surface on them: any splat close to the fitted height.
-    nu, nv, nh = surf.uvh(pos[near])
-    on_surface = np.abs(nh - surf.height(nu, nv)) < tol
-    occupied = grid.count(nu[on_surface], nv[on_surface]) > 0
-    ring_cells = grid.count(surf.u, surf.v) > 0
+    # Cells that already have surface: compare each cell's outermost splat with how far out
+    # the rim's cells typically reach. A pit's top sits well below that, however rough the rim.
+    def cell_tops(uu, vv, res):
+        ij = grid.ij(uu, vv)
+        key = ij[:, 0] * grid.dims[1] + ij[:, 1]
+        top = np.full(grid.dims[0] * grid.dims[1], -np.inf)
+        np.maximum.at(top, key, res)
+        return top.reshape(grid.dims)
+    ring_top = cell_tops(surf.u, surf.v, surf.resid)
+    ring_cells = np.isfinite(ring_top)
+    reach = float(np.percentile(ring_top[ring_cells], 10)) - spacing
+    solid_near = near[op[near] > 0.1]
+    nu, nv, nh = surf.uvh(pos[solid_near])
+    occupied = cell_tops(nu, nv, nh - surf.height(nu, nv)) >= reach
 
     all_ij = np.argwhere(np.ones(grid.dims, bool))
     cu, cv = grid.centres(all_ij).T
     painted = in_footprint(surf.point(cu, cv)).reshape(grid.dims)
-    fill_ij = np.argwhere(painted & ~occupied)
+    # footprint_is_hole: the caller already worked out (from the view) which part is missing.
+    fill_ij = np.argwhere(painted if footprint_is_hole else painted & ~occupied)
     per_cell = len(ring) / max(np.count_nonzero(ring_cells), 1) * density
     if len(fill_ij) == 0:
         return removed, 0, "The surface under the painted area is already covered"

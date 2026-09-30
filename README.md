@@ -6,7 +6,7 @@ dust, stray hairs, and the pin and the hole it leaves.
 
 Sidebar: **3D Viewport > N > Splat Patch**.
 
-| Top of the thorax as scanned, with the pin | Pin erased, strays removed, hole bridged |
+| Top of the thorax as scanned, with the pin | Pin erased, strays removed, hole bridged (a thin shadow remains), fibres and specks retouched |
 |---|---|
 | ![Before: the pin entering the top of the bee's thorax](docs/images/pin_before.jpg) | ![After: the same view with the pin gone and the surface continued across the hole](docs/images/pin_after.jpg) |
 
@@ -14,13 +14,13 @@ Sidebar: **3D Viewport > N > Splat Patch**.
 
 ### Retouching dust and fibres
 
-Close-ups from the same scan, same camera, before and after:
+Close-ups from the same session and camera, before and after:
 
 | Stray fibres lying on the hair: **Erase** along them with a small brush | |
 |---|---|
 | ![Before: white fibres lying across the thorax hair](docs/images/fibre_before.jpg) | ![After: the fibres erased, hair underneath intact](docs/images/fibre_after.jpg) |
 
-| Dust on the body: **Spot Heal** over each speck | |
+| White specks on the thorax plate: **Spot Heal** over each one | |
 |---|---|
 | ![Before: white dust specks on the dark thorax plate](docs/images/dust_before.jpg) | ![After: the specks healed from the surrounding surface](docs/images/dust_after.jpg) |
 
@@ -107,23 +107,29 @@ it, continuing the fuzz or shell from the edge of the hole.
 
 ![The pin entering the thorax](docs/images/bridge_1_pin.jpg)
 
-**2. Erase the pin.** Erase it in **Through** mode, then **Select Floaters** and **Delete Selected Splats**
-to clear the stray bits. That leaves a dark hole (circled) where you can see into the body.
+**2. Erase the pin.** With the **Erase** brush (Surface mode is fine), drag along the pin, starting next to
+the body and moving outwards, so each stroke starts on the pin rather than behind it. Dab any stubs left
+by the body, then press **Select Floaters** and **Delete** to clear the stray bits. That leaves a dark hole
+where you can see into the body.
 
-![After erasing the pin: a dark hole in the surface](docs/images/bridge_2_hole.jpg)
+![Erasing the pin with the Erase brush: the red trail is the stroke so far](docs/images/erase_pin.jpg)
 
-**3. Paint over the hole with Bridge.** Turn the view so you're looking fairly straight into the hole. Press
-**B** (or click **Bridge**) and press **F** to size the brush a little bigger than the hole. The solid ring is
-the brush; the fainter outer ring is how much surrounding surface it will read (*Rim Width*). Drag over the
-hole: the area you paint shows as a blue fill. Nothing changes until you let go.
+![After erasing the pin: a dark hole where it went in](docs/images/bridge_2_hole.jpg)
+
+**3. Paint over the hole with Bridge.** Orbit until you're looking into the hole. Press **B** (or click
+**Bridge**) and press **F** to size the brush. The solid ring is the brush; the fainter outer ring is how much
+surrounding surface it reads (*Rim Width*). Drag over the whole dark area, a little onto the intact surface:
+what you paint shows as a blue fill. Nothing changes until you let go.
 
 ![Painting over the hole with the Bridge brush](docs/images/bridge_3_paint.jpg)
 
-**4. Let go.** The hole is covered with new splats grown from its rim, level with the surrounding surface.
-The status bar reports how many were added (417 here). Anything deeper in the hole is left alone, now hidden
-behind the new surface.
+**4. Let go, then check from another angle.** Bridge fills the parts of the painted area that are deeper than
+the surrounding surface, as seen from your view, with splats copied from the rim. Orbit and look again: in
+this session a second Bridge stroke from the angle below filled more of it (the two strokes added about 700
+splats). A faint shadow can remain in a deep, narrow hole; a few light **Clone** strokes from a nearby patch
+cover it.
 
-![After Bridge: the hole covered, continuing the surrounding fuzz](docs/images/bridge_4_result.jpg)
+![After two Bridge strokes: most of the hole is covered; a thin dark slit remains at the deepest point](docs/images/bridge_4_result.jpg)
 
 **Tips**
 - *Fill With: Sample* clones the area around your sample point (Ctrl+click with Clone first) onto the
@@ -132,6 +138,9 @@ behind the new surface.
   strokes from a nearby hairy patch on top blend it in.
 - If the bridge looks wrong, press **R** (Restore) and paint over it: only the bridge's splats are removed,
   and you can try again from a straighter view.
+
+All the screenshots in this README come from one editing session on the Big Bee scan, made only with the
+add-on's own brushes, keys and panel buttons, as a user would.
 
 ## Restore (non-destructive edits)
 
