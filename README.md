@@ -68,8 +68,10 @@ Pick a tool button to start painting. While the brush is running:
 Starting the brush switches Solid view to **Flat** lighting so the splats show their true colours. The
 same list is in the panel under **Shortcuts**.
 
-Strokes don't create Blender undo steps (on big scans each would copy the whole cloud): use the
-**Restore** brush to undo edits anywhere.
+Strokes don't create Blender undo steps: use the **Restore** brush to undo edits anywhere. On scans over
+a million splats the panel buttons don't either, because every undo step keeps another full copy of the
+cloud in memory (about 1.2 GB per step at 5 million splats, up to 32 steps). On such scans Ctrl+Z after
+some other action can jump back past your splat edits; Ctrl+Shift+Z brings them back.
 
 - **Erase**: deletes splats; the feather fades them instead. Erase, Select and Spot Heal also work over
   empty space: with nothing solid under the brush (a white circle), they take everything under the
@@ -190,6 +192,8 @@ the original file exactly. Positions are written in object space (the object tra
 - **Large scans:** on a 2-million-splat scan, starting the brush takes about 1¼ s, hovering and dabs a few
   milliseconds, and erase/select/restore strokes under 0.1 s. Strokes that add splats (Clone, Heal,
   Spot Heal, Bridge) take about 0.6 s, because Blender has to rewrite the whole cloud when it grows.
+  While the brush runs it holds a working copy of the scan (about 3 GB at 5 million splats); it's freed
+  when you leave the brush. Export streams to the file and needs little extra memory.
 - **Erased splats stay in the .blend.** They're hidden, not deleted, so they can be restored; the file
   keeps its full size while you edit. Export Splat PLY leaves them out of the exported file.
 - **Bridge rebuilds one surface layer.** Where the gap was thick with hair, the bridged patch can look
@@ -202,5 +206,12 @@ the original file exactly. Positions are written in object space (the object tra
 
 ```
 blender --command extension build --source-dir gs_patch --output-dir dist
-blender --command extension install-file -r user_default -e dist/gs_patch-0.1.0.zip
+blender --command extension install-file -r user_default -e dist/gs_patch-<version>.zip
+```
+
+Tests (any 3DGS PLY):
+
+```
+blender -b --factory-startup --python tests/test_core.py -- scan.ply
+blender --enable-event-simulate --python tests/test_ui.py -- scan.ply
 ```

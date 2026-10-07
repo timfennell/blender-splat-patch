@@ -7,7 +7,7 @@ from mathutils import Vector
 
 from . import core, view, stash
 from .splats import SplatSet, is_splat_object, major_axes, SELECT_ATTR, HIDDEN_ATTR, OPACITY_COLUMNS
-from .ply_io import write_splat_ply
+from .ply_io import write_pointcloud_ply
 
 TOOL_ITEMS = [
     ('ERASE', "Erase", "Paint to delete splats (dust, hairs, pins)", 'TRASH', 0),
@@ -66,6 +66,17 @@ def bump_revision(obj):
     rev = int(obj.data.get(_REV_KEY, 0)) + 1
     obj.data[_REV_KEY] = rev
     return rev
+
+
+# Above this many splats, splat edits don't create Blender undo steps: each step would keep
+# another full copy of the cloud in memory (about 1.2 GB per step at 5M splats, up to 32
+# steps), which is what ran large scans out of memory. Restore is the undo for these.
+UNDO_SPLAT_LIMIT = 1_000_000
+
+
+def undo_push(obj, message):
+    if obj is not None and len(obj.data.points) <= UNDO_SPLAT_LIMIT:
+        bpy.ops.ed.undo_push(message=message)
 
 
 def save(obj, S, only=None):
@@ -203,13 +214,24 @@ class GSP_OT_brush(bpy.types.Operator):
             self._handle_px = None
         STATE["running"] = False
         if getattr(self, "edited", False):
-            bpy.ops.ed.undo_push(message="Splat brush")
+            undo_push(self.obj, "Splat brush")
         try:
             self.overlay_settings.show_outline_selected = self.had_outline
         except ReferenceError:
             pass
         context.workspace.status_text_set(None)
         self.area.tag_redraw()
+        self.release()
+
+    def release(self):
+        """Drop the brush's working copy of the cloud. Blender keeps finished operator
+        instances alive, so without this every brush session leaked gigabytes on big scans."""
+        for name in ("S", "T", "axes", "long_idx", "proj", "overlay", "stroke", "rs_remove",
+                     "rs_unfade", "rs_restore", "spot_dabs", "bridge_centres", "_hole_fit"):
+            if name in self.__dict__:
+                setattr(self, name, None)
+        import gc
+        gc.collect()
 
     # ---------------------------------------------------------- helpers
     def stale(self):
@@ -980,7 +1002,21 @@ def draw_selection():
 
 
 class _SplatOp:
-    bl_options = {'REGISTER', 'UNDO'}
+    # Undo is pushed by hand (see undo_push), so big scans don't fill memory with copies.
+    bl_options = {'REGISTER'}
+
+    def __init_subclass__(cls, **kw):
+        super().__init_subclass__(**kw)
+        run = cls.__dict__.get("execute")
+        if run is None:
+            return
+
+        def execute(self, context):
+            result = run(self, context)
+            if 'FINISHED' in result:
+                undo_push(active_splats(context), self.bl_label)
+            return result
+        cls.execute = execute
 
     @classmethod
     def poll(cls, context):
@@ -1143,11 +1179,15 @@ class GSP_OT_export_ply(bpy.types.Operator, ExportHelper):
         obj = active_splats(context)
         if not self.filepath:
             self.filepath = bpy.path.clean_name(obj.name) + "_patched.ply"
+        # The brush keeps its own copy of the whole cloud; stop it so that memory is freed
+        # before writing (on multi-million-splat scans that copy is gigabytes).
+        STATE["running"] = False
         return ExportHelper.invoke(self, context, event)
 
     def execute(self, context):
         obj = active_splats(context)
-        n = write_splat_ply(self.filepath, SplatSet.read(obj.data).visible_subset())
+        STATE["running"] = False
+        n = write_pointcloud_ply(self.filepath, obj.data)
         self.report({'INFO'}, f"Wrote {n} splats to {self.filepath}")
         return {'FINISHED'}
 
