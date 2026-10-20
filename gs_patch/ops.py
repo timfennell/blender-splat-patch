@@ -5,8 +5,9 @@ import numpy as np
 from bpy_extras.io_utils import ExportHelper
 from mathutils import Vector
 
-from . import core, view, stash
-from .splats import SplatSet, is_splat_object, major_axes, SELECT_ATTR, HIDDEN_ATTR, OPACITY_COLUMNS
+from . import core, merge, view, stash
+from .splats import (SplatSet, is_splat_object, major_axes, concat_rows, set_from_rows,
+                     SELECT_ATTR, HIDDEN_ATTR, OPACITY_COLUMNS)
 from .ply_io import write_pointcloud_ply
 
 TOOL_ITEMS = [
@@ -1192,6 +1193,84 @@ class GSP_OT_export_ply(bpy.types.Operator, ExportHelper):
         return {'FINISHED'}
 
 
+def _selected_splats(context):
+    return [o for o in context.selected_objects if is_splat_object(o)]
+
+
+class GSP_OT_merge_splats(bpy.types.Operator):
+    """Combine the selected splat objects into one model, where they sit now (in the active
+    object's space): each splat's position, rotation, size and view-dependent colour carried
+    across. Erased splats and their restore history come along. Export it as one PLY"""
+    bl_idname = "gsp.merge_splats"
+    bl_label = "Merge Splat Objects"
+    bl_options = {'REGISTER'}
+
+    originals: bpy.props.EnumProperty(
+        name="Originals", default='HIDE',
+        items=[('HIDE', "Hide", "Keep the originals, hidden in the viewport and renders"),
+               ('KEEP', "Keep Visible", "Leave the originals as they are"),
+               ('DELETE', "Delete", "Remove the original objects")])
+
+    @classmethod
+    def poll(cls, context):
+        return len(_selected_splats(context)) >= 2
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self)
+
+    def execute(self, context):
+        STATE["running"] = False               # the brush's copy of a cloud is freed first
+        objs = _selected_splats(context)
+        target = active_splats(context)
+        if target not in objs:
+            target = objs[0]
+        to_target = np.linalg.inv(np.array(target.matrix_world, np.float64))
+        parts, stashed, notes = [], [], []
+        total = 0
+        for ob in objs:
+            M = to_target @ np.array(ob.matrix_world, np.float64)
+            S = SplatSet.read(ob.data)
+            rows, why = merge.transform_rows(S.arrays, M)
+            del S
+            parts.append(rows)
+            total += len(rows["position"][1])
+            notes += [f"{ob.name}: {w}" for w in why]
+            T = stash.read(ob)
+            if T is not None:
+                stashed.append(merge.transform_rows(T.arrays, M)[0])
+        merged = set_from_rows(concat_rows(parts))
+        parts.clear()
+        pc = bpy.data.pointclouds.new(target.data.name + "_merged")
+        merged.write(pc)
+        for m in target.data.materials:
+            pc.materials.append(m)
+        new = target.copy()                     # its transform, modifiers and display settings
+        new.data = pc
+        new.name = target.name + "_merged"
+        for coll in target.users_collection:
+            coll.objects.link(new)
+        if stashed:
+            stash.write(new, set_from_rows(concat_rows(stashed)))
+        for ob in objs:
+            if self.originals == 'DELETE':
+                bpy.data.objects.remove(ob)
+            elif self.originals == 'HIDE':
+                ob.hide_set(True)
+                ob.hide_render = True
+        for ob in context.view_layer.objects:
+            ob.select_set(False)
+        new.select_set(True)
+        context.view_layer.objects.active = new
+        undo_push(new, self.bl_label)
+        msg = f"Merged {len(objs)} objects into '{new.name}': {total:,} splats"
+        if notes:
+            msg += ". Approximated: " + "; ".join(notes)
+            self.report({'WARNING'}, msg)
+        else:
+            self.report({'INFO'}, msg)
+        return {'FINISHED'}
+
+
 class GSP_OT_stop_brush(bpy.types.Operator):
     """Leave the splat brush"""
     bl_idname = "gsp.stop_brush"
@@ -1212,5 +1291,6 @@ classes = (
     GSP_OT_fill_selected,
     GSP_OT_source_from_cursor,
     GSP_OT_export_ply,
+    GSP_OT_merge_splats,
     GSP_OT_stop_brush,
 )

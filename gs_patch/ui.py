@@ -243,6 +243,7 @@ class GSP_PT_export(bpy.types.Panel):
         return is_splat_object(context.active_object)
 
     def draw(self, context):
+        self.layout.operator("gsp.merge_splats", icon='AUTOMERGE_ON')
         self.layout.operator("gsp.export_ply", icon='EXPORT')
 
 

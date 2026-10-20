@@ -179,11 +179,31 @@ can keep refining. Edits made before version 0.1.3 were not recorded and can't b
 The fill fits a smooth surface to the ring of splats around the gap, finds the gap in that surface, and
 fills it to the ring's density. Heal Settings (Border, Grain, Colour Smoothing, Density) tune it.
 
+## Merge: several models into one
+
+To composite several scans (or several copies of one) into a single model: place them as you want
+them, select them all, make the one whose position should anchor the result active, and press
+**Merge Splat Objects** (in the Export panel). It makes one new object, `<active>_merged`, exactly
+where the models were:
+
+- every splat's position, rotation and size is carried into the active object's space, and its
+  view-dependent colour (the higher SH bands) is turned with it, so it still looks right from every side;
+- erased splats and the Restore brush's history come along (the merged model can still be restored);
+- models with different SH degrees or attributes are padded to match;
+- the originals are hidden (or kept visible, or deleted: a choice in the dialog).
+
+Then **Export Splat PLY** writes the merged model as one file. Tested with a scaled, rotated and
+moved copy: positions, orientations, sizes and view-dependent colour match the originals to float
+precision, and the merged model renders identically. A non-uniform scale or a mirrored object can't be
+carried exactly by splats: their average scale or nearest rotation is used, with a warning. Merging
+holds a working copy of every model at once (about 250 bytes a splat).
+
 ## Export
 
 Blender 5.3's PLY exporter writes 0 points for a point cloud, so use **Export > Export Splat PLY**.
 It writes the standard INRIA 3DGS layout that Brush, SuperSplat and Blender read. A round trip matches
-the original file exactly. Positions are written in object space (the object transform is ignored).
+the original file exactly. Positions are written in object space (the object transform is ignored; merge
+models first to bake their placement in).
 
 ## Limits
 
