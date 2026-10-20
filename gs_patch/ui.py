@@ -232,7 +232,7 @@ class GSP_PT_shortcuts(bpy.types.Panel):
 
 
 class GSP_PT_export(bpy.types.Panel):
-    bl_label = "Export"
+    bl_label = "Bake, Merge & Export"
     bl_parent_id = "GSP_PT_panel"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
@@ -243,6 +243,7 @@ class GSP_PT_export(bpy.types.Panel):
         return is_splat_object(context.active_object)
 
     def draw(self, context):
+        self.layout.operator("gsp.bake_edits", icon='CHECKMARK')
         self.layout.operator("gsp.merge_splats", icon='AUTOMERGE_ON')
         self.layout.operator("gsp.export_ply", icon='EXPORT')
 

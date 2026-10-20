@@ -179,11 +179,21 @@ can keep refining. Edits made before version 0.1.3 were not recorded and can't b
 The fill fits a smooth surface to the ring of splats around the gap, finds the gap in that surface, and
 fills it to the ring's density. Heal Settings (Border, Grain, Colour Smoothing, Density) tune it.
 
+## Bake: make the edits permanent
+
+Erasing hides splats rather than deleting them, and every edit keeps bookkeeping (what was erased,
+added or faded, and the erased originals the Restore brush can bring back), so the model keeps its full
+size while you work. When you're happy with it, **Bake Edits** (in the Bake, Merge & Export panel)
+deletes the erased splats, drops the stashed originals and the bookkeeping, and leaves a plain model of
+its visible splats: smaller in memory and in the .blend. It asks first, since Restore can't bring back
+anything erased before the bake. What you export doesn't change (export already leaves erased splats
+out); the brushes keep working on a baked model, with a fresh history.
+
 ## Merge: several models into one
 
 To composite several scans (or several copies of one) into a single model: place them as you want
 them, select them all, make the one whose position should anchor the result active, and press
-**Merge Splat Objects** (in the Export panel). It makes one new object, `<active>_merged`, exactly
+**Merge Splat Objects** (in the Bake, Merge & Export panel). It makes one new object, `<active>_merged`, exactly
 where the models were:
 
 - every splat's position, rotation and size is carried into the active object's space, and its

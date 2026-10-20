@@ -6,6 +6,7 @@ from bpy_extras.io_utils import ExportHelper
 from mathutils import Vector
 
 from . import core, merge, view, stash
+from .splats import _TRACKING
 from .splats import (SplatSet, is_splat_object, major_axes, concat_rows, set_from_rows,
                      SELECT_ATTR, HIDDEN_ATTR, OPACITY_COLUMNS)
 from .ply_io import write_pointcloud_ply
@@ -1271,6 +1272,76 @@ class GSP_OT_merge_splats(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def _edit_counts(obj):
+    """(erased splats still in the model, erased originals in the stash, tracking columns)."""
+    pc = obj.data
+    hidden = 0
+    attr = pc.attributes.get(HIDDEN_ATTR)
+    if attr is not None and len(pc.points):
+        buf = np.empty(len(pc.points), bool)
+        attr.data.foreach_get("value", buf)
+        hidden = int(buf.sum())
+    st = stash.get(obj)
+    tracked = [n for n in _TRACKING if pc.attributes.get(n) is not None]
+    return hidden, (len(st.points) if st is not None else 0), tracked
+
+
+class GSP_OT_bake_edits(bpy.types.Operator):
+    """Make the edits permanent: erased splats are deleted, the erased originals kept for the
+    Restore brush are dropped, and the edit bookkeeping is removed, so the model costs only
+    its visible splats in memory and in the .blend. Restore can't bring back anything erased
+    before the bake"""
+    bl_idname = "gsp.bake_edits"
+    bl_label = "Bake Edits"
+    bl_options = {'REGISTER'}
+
+    @classmethod
+    def poll(cls, context):
+        return active_splats(context) is not None
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, confirm_text="Bake")
+
+    def draw(self, context):
+        hidden, stashed, tracked = _edit_counts(active_splats(context))
+        col = self.layout.column()
+        col.label(text=f"{hidden:,} erased splats will be deleted.")
+        col.label(text=f"{stashed:,} stashed originals will be dropped.")
+        col.label(text="Restore can't undo edits made before the bake.", icon='ERROR')
+
+    def execute(self, context):
+        STATE["running"] = False               # the brush's working copy goes too
+        obj = active_splats(context)
+        pc = obj.data
+        hidden, stashed, _ = _edit_counts(obj)
+        S = SplatSet.read(pc)
+        keep = ~S.hidden
+        rows = {k: [dt, a[keep]] for k, (dt, a) in S.arrays.items() if k not in _TRACKING}
+        n = int(keep.sum())
+        del S
+        if hidden:
+            pc.resize(n)
+        for name in list(_TRACKING):
+            attr = pc.attributes.get(name)
+            if attr is not None:
+                pc.attributes.remove(attr)
+        if hidden:
+            SplatSet(n, rows).write(pc)
+        del rows
+        st = stash.get(obj)
+        if st is not None:
+            del pc[stash.STASH_KEY]
+            st.use_fake_user = False
+            if st.users == 0:
+                bpy.data.pointclouds.remove(st)
+        bump_revision(obj)
+        pc.update_tag()
+        undo_push(obj, self.bl_label)
+        self.report({'INFO'}, f"Baked '{obj.name}': {n:,} splats; deleted {hidden:,} erased, "
+                              f"dropped {stashed:,} stashed")
+        return {'FINISHED'}
+
+
 class GSP_OT_stop_brush(bpy.types.Operator):
     """Leave the splat brush"""
     bl_idname = "gsp.stop_brush"
@@ -1292,5 +1363,6 @@ classes = (
     GSP_OT_source_from_cursor,
     GSP_OT_export_ply,
     GSP_OT_merge_splats,
+    GSP_OT_bake_edits,
     GSP_OT_stop_brush,
 )
