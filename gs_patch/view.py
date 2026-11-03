@@ -241,3 +241,25 @@ class Overlay:
                 draw_lines([circle_coords(center, normal, radius)], color, width)
         gpu.state.blend_set('NONE')
         gpu.state.point_size_set(1.0)
+
+
+def draw_wire_sphere(matrix_world, center, radius, color, segments=64):
+    """Three great circles (object space centre and radius) drawn in the 3D view."""
+    ang = np.linspace(0.0, 2 * np.pi, segments, endpoint=False)
+    c, sn = np.cos(ang) * radius, np.sin(ang) * radius
+    z = np.zeros_like(ang)
+    lines = []
+    for ring in (np.stack([c, sn, z], 1), np.stack([c, z, sn], 1), np.stack([z, c, sn], 1)):
+        ring = ring + np.asarray(center)
+        nxt = np.roll(ring, -1, axis=0)
+        lines.append(np.stack([ring, nxt], 1).reshape(-1, 3))
+    pts = np.concatenate(lines)
+    M = np.array(matrix_world, np.float64)
+    pts = (pts @ M[:3, :3].T + M[:3, 3]).astype(np.float32)
+    shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+    batch = batch_for_shader(shader, 'LINES', {"pos": pts.tolist()})
+    gpu.state.blend_set('ALPHA')
+    shader.bind()
+    shader.uniform_float("color", color)
+    batch.draw(shader)
+    gpu.state.blend_set('NONE')

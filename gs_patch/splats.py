@@ -33,6 +33,8 @@ ADDED_ATTR = "gsp_added"            # splat was created by an edit (clone, heal,
 FADED_ATTR = "gsp_faded"            # splat's opacity was reduced by a feathered edit
 HIDDEN_ATTR = "gsp_hidden"          # splat was erased: kept (opacity 0) so it can be restored
 ORIG_OPACITY_ATTR = "gsp_orig_opacity"
+LOCKED_ATTR = "gsp_locked"          # a work area's low-detail surroundings: never edited, sampled or selected
+FULL_INDEX_ATTR = "gsp_full_index"  # a work area splat's row in the full model (-1: not in it yet)
 BASE_ATTR = "radiance:base"
 
 # Bookkeeping attributes every splat set carries, created on first read.
@@ -143,8 +145,15 @@ class SplatSet:
         return self.arrays[HIDDEN_ATTR][1][:, 0]
 
     @property
+    def locked(self):
+        entry = self.arrays.get(LOCKED_ATTR)
+        return None if entry is None else entry[1][:, 0].astype(bool)
+
+    @property
     def visible(self):
-        return ~self.hidden
+        """Splats the tools may touch: not erased, and not a work area's locked surroundings."""
+        locked = self.locked
+        return ~self.hidden if locked is None else ~self.hidden & ~locked
 
     # --------------------------------------------------------- spatial grid
     def near(self, center, radius):
@@ -156,6 +165,9 @@ class SplatSet:
         if self.n > g.n:   # splats added since the grid was built
             extra = np.arange(g.n, self.n)
             cand = np.concatenate([cand, extra[np.linalg.norm(self.pos[extra] - center, axis=1) < radius]])
+        locked = self.locked
+        if locked is not None:
+            cand = cand[~locked[cand]]
         return cand
 
     def sh_names(self):
@@ -175,7 +187,7 @@ class SplatSet:
     # ------------------------------------------------------------- editing
     def hide(self, mask):
         """Erase splats without removing them: opacity 0, flagged, original opacity kept."""
-        mask = np.asarray(mask, bool) & ~self.hidden
+        mask = np.asarray(mask, bool) & self.visible
         if not mask.any():
             return 0
         base = self.base
@@ -244,7 +256,8 @@ class SplatSet:
         m = len(src_idx)
         defaults = {ADDED_ATTR: np.ones((m, 1), bool), FADED_ATTR: np.zeros((m, 1), bool),
                     HIDDEN_ATTR: np.zeros((m, 1), bool),
-                    ORIG_OPACITY_ATTR: np.zeros((m, 1), np.float32), SELECT_ATTR: np.zeros((m, 1), bool)}
+                    ORIG_OPACITY_ATTR: np.zeros((m, 1), np.float32), SELECT_ATTR: np.zeros((m, 1), bool),
+                    LOCKED_ATTR: np.zeros((m, 1), bool), FULL_INDEX_ATTR: np.full((m, 1), -1, np.int32)}
         for name, entry in self.arrays.items():
             new = overrides.get(name)
             if new is None:
@@ -264,8 +277,10 @@ class SplatSet:
                 new = rows[name][1]
             else:
                 new = np.zeros((m,) + entry[1].shape[1:], entry[1].dtype)
-            if name in (ADDED_ATTR, FADED_ATTR, SELECT_ATTR, HIDDEN_ATTR):
+            if name in (ADDED_ATTR, FADED_ATTR, SELECT_ATTR, HIDDEN_ATTR, LOCKED_ATTR):
                 new = np.zeros((m, 1), bool)
+            elif name == FULL_INDEX_ATTR:       # new to the full model, whatever it was before
+                new = np.full((m, 1), -1, np.int32)
             entry[1] = np.concatenate([entry[1], np.asarray(new, entry[1].dtype)], axis=0)
         self.n += m
 

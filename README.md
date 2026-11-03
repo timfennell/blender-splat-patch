@@ -193,6 +193,20 @@ While a stand-in shows, the brushes and selection tools are off (they need the m
 [Spirula Render](https://github.com/timfennell/blender-splat-render) engine (0.10.3 or later), F12
 renders use the full models and the viewport the stand-ins.
 
+### Work area: full detail where you brush
+
+To retouch part of a model while the rest stays light, put the 3D cursor on the spot, set
+**Work Radius** and press **Focus Work Area**. Inside the sphere (drawn as an orange wire) every
+splat of the full model is back, view-dependent colour included; outside it the stand-in stays.
+The brushes and selection tools work as usual inside it. The low-detail surroundings are
+locked: they're never erased, selected, cloned from or healed with.
+
+Edits go into the full model when you move the area (Focus again with the cursor somewhere
+else), when you press **Leave Work Area** (back to a stand-in, rebuilt from the edited model) or
+**Full Detail**, and on their own before an F12 render, **Export**, **Merge** and **Bake**. So
+renders are always full detail with every edit in them. Erased splats outside the area can be
+restored once the area covers them again.
+
 ## Bake: make the edits permanent
 
 Erasing hides splats rather than deleting them, and every edit keeps bookkeeping (what was erased,

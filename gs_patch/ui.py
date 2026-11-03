@@ -9,6 +9,8 @@ class GSP_Props(bpy.types.PropertyGroup):
     lod_fraction: bpy.props.FloatProperty(
         name="Detail", default=0.1, min=0.005, max=0.9, subtype='FACTOR',
         description="Share of each model's splats a low-detail stand-in keeps")
+    work_radius: bpy.props.FloatProperty(name="Work Radius", default=0.1, min=1e-6, unit='LENGTH',
+                                         description="Radius of the full-detail work area around the 3D cursor")
     radius_px: bpy.props.IntProperty(name="Radius", subtype='PIXEL', default=40, min=3, max=1000,
                                      description="Brush radius in screen pixels ([ and ] while painting)")
     feather: bpy.props.FloatProperty(name="Feather", default=0.35, min=0.0, max=1.0, subtype='FACTOR',
@@ -272,6 +274,9 @@ class GSP_PT_lod(bpy.types.Panel):
             if lod.is_proxy(obj):
                 layout.label(text=f"Low detail: {len(obj.data.points):,} of {len(full.points):,} splats",
                              icon='MOD_DECIM')
+            elif lod.is_workarea(obj):
+                layout.label(text=f"Work area: {len(obj.data.points):,} showing of {len(full.points):,}",
+                             icon='PIVOT_CURSOR')
             else:
                 layout.label(text=f"Full detail: {len(full.points):,} splats", icon='MESH_UVSPHERE')
         layout.prop(p, "lod_fraction")
@@ -279,6 +284,13 @@ class GSP_PT_lod(bpy.types.Panel):
         row.operator("gsp.low_detail", icon='MOD_DECIM').fraction = p.lod_fraction
         row.operator("gsp.full_detail", icon='MESH_UVSPHERE')
         layout.label(text="Applies to the selected models", icon='INFO')
+        box = layout.box()
+        box.label(text="Work Area (active model)")
+        box.prop(p, "work_radius")
+        row = box.row(align=True)
+        op = row.operator("gsp.focus_workarea", icon='PIVOT_CURSOR')
+        op.radius, op.fraction = p.work_radius, p.lod_fraction
+        row.operator("gsp.leave_workarea", icon='LOOP_BACK')
 
 
 classes = (GSP_Props, GSP_PT_panel, GSP_PT_brush, GSP_PT_sample, GSP_PT_selection,

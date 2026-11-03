@@ -6,7 +6,7 @@ from bpy_extras.io_utils import ExportHelper
 from mathutils import Vector
 
 from . import core, lod, merge, view, stash
-from .splats import _TRACKING
+from .splats import _TRACKING, LOCKED_ATTR, FULL_INDEX_ATTR
 from .splats import (SplatSet, is_splat_object, major_axes, concat_rows, set_from_rows,
                      SELECT_ATTR, HIDDEN_ATTR, OPACITY_COLUMNS)
 from .ply_io import write_pointcloud_ply
@@ -65,9 +65,12 @@ def props_of(context):
 
 
 def bump_revision(obj):
-    data = lod.full_data(obj)
-    rev = int(data.get(_REV_KEY, 0)) + 1
-    data[_REV_KEY] = rev
+    """Mark the model changed (a work area and the full model behind it both)."""
+    full = lod.full_data(obj)
+    if full != obj.data:
+        full[_REV_KEY] = int(full.get(_REV_KEY, 0)) + 1
+    rev = int(obj.data.get(_REV_KEY, 0)) + 1
+    obj.data[_REV_KEY] = rev
     return rev
 
 
@@ -78,7 +81,7 @@ UNDO_SPLAT_LIMIT = 1_000_000
 
 
 def undo_push(obj, message):
-    if obj is not None and len(lod.full_data(obj).points) <= UNDO_SPLAT_LIMIT:
+    if obj is not None and len(obj.data.points) <= UNDO_SPLAT_LIMIT:
         bpy.ops.ed.undo_push(message=message)
 
 
@@ -101,7 +104,8 @@ def commit(context, obj, S, message, only=None):
 
 
 def editable_splats(context):
-    """The active splat object, unless a low-detail proxy is showing (brushes need the model)."""
+    """The active splat object, unless a low-detail proxy is showing (brushes need the model;
+    a work area is fine)."""
     obj = active_splats(context)
     return None if obj is None or lod.is_proxy(obj) else obj
 
@@ -133,7 +137,7 @@ class GSP_OT_brush(bpy.types.Operator):
     @classmethod
     def poll(cls, context):
         if lod.is_proxy(context.active_object):
-            cls.poll_message_set("Low detail is showing: bring back Full Detail to edit")
+            cls.poll_message_set("Low detail is showing: Focus a Work Area or bring back Full Detail to edit")
             return False
         return context.area and context.area.type == 'VIEW_3D' and active_splats(context)
 
@@ -1033,7 +1037,7 @@ class _SplatOp:
     @classmethod
     def poll(cls, context):
         if lod.is_proxy(context.active_object):
-            cls.poll_message_set("Low detail is showing: bring back Full Detail to edit")
+            cls.poll_message_set("Low detail is showing: Focus a Work Area or bring back Full Detail to edit")
             return False
         return active_splats(context) is not None
 
@@ -1202,6 +1206,7 @@ class GSP_OT_export_ply(bpy.types.Operator, ExportHelper):
     def execute(self, context):
         obj = active_splats(context)
         STATE["running"] = False
+        lod.sync(obj)                           # a work area's edits go into the full model first
         n = write_pointcloud_ply(self.filepath, lod.full_data(obj))
         self.report({'INFO'}, f"Wrote {n} splats to {self.filepath}")
         return {'FINISHED'}
@@ -1243,7 +1248,10 @@ class GSP_OT_merge_splats(bpy.types.Operator):
         total = 0
         for ob in objs:
             M = to_target @ np.array(ob.matrix_world, np.float64)
+            lod.sync(ob)
             S = SplatSet.read(lod.full_data(ob))
+            for name in _WORKAREA_COLUMNS:
+                S.arrays.pop(name, None)
             rows, why = merge.transform_rows(S.arrays, M)
             del S
             parts.append(rows)
@@ -1251,6 +1259,8 @@ class GSP_OT_merge_splats(bpy.types.Operator):
             notes += [f"{ob.name}: {w}" for w in why]
             T = stash.read(ob)
             if T is not None:
+                for name in _WORKAREA_COLUMNS:
+                    T.arrays.pop(name, None)
                 stashed.append(merge.transform_rows(T.arrays, M)[0])
         merged = set_from_rows(concat_rows(parts))
         parts.clear()
@@ -1285,6 +1295,9 @@ class GSP_OT_merge_splats(bpy.types.Operator):
         return {'FINISHED'}
 
 
+_WORKAREA_COLUMNS = (LOCKED_ATTR, FULL_INDEX_ATTR, lod.IN_WORK_ATTR)
+
+
 def _edit_counts(obj):
     """(erased splats still in the model, erased originals in the stash, tracking columns)."""
     pc = lod.full_data(obj)
@@ -1313,6 +1326,7 @@ class GSP_OT_bake_edits(bpy.types.Operator):
         return active_splats(context) is not None
 
     def invoke(self, context, event):
+        lod.sync(active_splats(context))        # count a work area's edits too
         return context.window_manager.invoke_props_dialog(self, confirm_text="Bake")
 
     def draw(self, context):
@@ -1325,6 +1339,12 @@ class GSP_OT_bake_edits(bpy.types.Operator):
     def execute(self, context):
         STATE["running"] = False               # the brush's working copy goes too
         obj = active_splats(context)
+        # Baking renumbers the full model's splats, so an open work area is closed (its edits
+        # written back) and opened again on the baked model.
+        area = lod.workarea(obj)
+        if area is not None:
+            fraction = float(obj.data.get(lod.FRACTION_KEY, 0.1))
+            lod.restore(obj)
         pc = lod.full_data(obj)                 # a proxy's full model, if one is showing
         hidden, stashed, _ = _edit_counts(obj)
         S = SplatSet.read(pc)
@@ -1349,6 +1369,8 @@ class GSP_OT_bake_edits(bpy.types.Operator):
                 bpy.data.pointclouds.remove(st)
         bump_revision(obj)
         pc.update_tag()
+        if area is not None:
+            lod.open_workarea(obj, area[0], area[1], fraction)
         undo_push(obj, self.bl_label)
         self.report({'INFO'}, f"Baked '{obj.name}': {n:,} splats; deleted {hidden:,} erased, "
                               f"dropped {stashed:,} stashed")
@@ -1389,12 +1411,86 @@ class GSP_OT_full_detail(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return any(lod.is_proxy(o) for o in _selected_splats(context))
+        return any(lod.is_standin(o) for o in _selected_splats(context))
 
     def execute(self, context):
-        n = sum(lod.restore(ob) for ob in _selected_splats(context) if lod.is_proxy(ob))
+        STATE["running"] = False
+        n = sum(lod.restore(ob) for ob in _selected_splats(context) if lod.is_standin(ob))
         self.report({'INFO'}, f"Full detail: {n:,} splats")
         return {'FINISHED'}
+
+
+def _world_to_object_radius(obj, radius):
+    scale = sum(abs(s) for s in obj.matrix_world.to_scale()) / 3.0
+    return radius / max(scale, 1e-12)
+
+
+class GSP_OT_focus_workarea(bpy.types.Operator):
+    """Full detail inside a sphere around the 3D cursor, low detail everywhere else. The brushes
+    and selection tools work inside it; the low-detail surroundings are locked. Edits go into
+    the full model when the area moves or closes, and before rendering, exporting, merging and
+    baking"""
+    bl_idname = "gsp.focus_workarea"
+    bl_label = "Focus Work Area"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    radius: bpy.props.FloatProperty(name="Radius", default=0.1, min=1e-6, unit='LENGTH',
+                                    description="Radius of the full-detail sphere")
+    fraction: bpy.props.FloatProperty(
+        name="Detail", default=0.1, min=0.005, max=0.9, subtype='FACTOR',
+        description="Share of the model's splats kept outside the work area")
+
+    @classmethod
+    def poll(cls, context):
+        return active_splats(context) is not None
+
+    def execute(self, context):
+        STATE["running"] = False               # the brush reloads on the new cloud
+        obj = active_splats(context)
+        c = np.array(obj.matrix_world.inverted() @ context.scene.cursor.location, np.float64)
+        inside, outside = lod.open_workarea(obj, c, _world_to_object_radius(obj, self.radius),
+                                            self.fraction)
+        n = len(lod.full_data(obj).points)
+        self.report({'INFO'}, f"Work area: {inside:,} of {n:,} splats at full detail, "
+                              f"{outside:,} low-detail around them")
+        return {'FINISHED'}
+
+
+class GSP_OT_leave_workarea(bpy.types.Operator):
+    """Write the work area's edits into the full model and go back to the low-detail stand-in"""
+    bl_idname = "gsp.leave_workarea"
+    bl_label = "Leave Work Area"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return lod.is_workarea(context.active_object)
+
+    def execute(self, context):
+        STATE["running"] = False
+        obj = context.active_object
+        fraction = float(obj.data.get(lod.FRACTION_KEY, 0.1))
+        n = lod.make_proxy(obj, fraction)
+        self.report({'INFO'}, f"Edits saved; low detail: {n:,} splats showing")
+        return {'FINISHED'}
+
+
+@bpy.app.handlers.persistent
+def sync_workareas(*_args):
+    """Final renders read the full models: write every work area's edits into them first."""
+    for ob in bpy.data.objects:
+        if lod.is_workarea(ob):
+            lod.sync(ob)
+
+
+def draw_workareas():
+    """A wire sphere around each visible work area."""
+    ctx = bpy.context
+    for ob in ctx.visible_objects if hasattr(ctx, "visible_objects") else ():
+        area = lod.workarea(ob)
+        if area is not None:
+            view.draw_wire_sphere(ob.matrix_world, area[0], area[1],
+                                  (1.0, 0.75, 0.2, 0.9) if ob == ctx.active_object else (1.0, 0.75, 0.2, 0.4))
 
 
 class GSP_OT_stop_brush(bpy.types.Operator):
@@ -1421,5 +1517,7 @@ classes = (
     GSP_OT_bake_edits,
     GSP_OT_low_detail,
     GSP_OT_full_detail,
+    GSP_OT_focus_workarea,
+    GSP_OT_leave_workarea,
     GSP_OT_stop_brush,
 )
