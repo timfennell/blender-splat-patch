@@ -179,6 +179,20 @@ can keep refining. Edits made before version 0.1.3 were not recorded and can't b
 The fill fits a smooth surface to the ring of splats around the gap, finds the gap in that surface, and
 fills it to the ring's density. Heal Settings (Border, Grain, Colour Smoothing, Density) tune it.
 
+## Level of detail: light stand-ins while arranging
+
+Several multi-million-splat scans make the whole viewport slow. Select the models you're arranging and
+press **Low Detail** (Level of Detail panel): each shows a stand-in with a share of its splats (10% by
+default, the **Detail** slider). The most visible splats are the likeliest kept, and each kept splat
+carries the opacity of the ones dropped around it, so wings and fur stay their density. Stand-ins have
+no view-dependent colour, so they look slightly warmer. The full models stay in the .blend
+but aren't drawn or evaluated; **Full Detail** brings them back.
+
+While a stand-in shows, the brushes and selection tools are off (they need the model), and
+**Export**, **Merge** and **Bake** use the full model. With the
+[Spirula Render](https://github.com/timfennell/blender-splat-render) engine (0.10.3 or later), F12
+renders use the full models and the viewport the stand-ins.
+
 ## Bake: make the edits permanent
 
 Erasing hides splats rather than deleting them, and every edit keeps bookkeeping (what was erased,

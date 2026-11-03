@@ -13,16 +13,21 @@ from .splats import SplatSet, concat_rows, set_from_rows
 STASH_KEY = "gsp_stash"
 
 
+def _data(obj):
+    from .lod import full_data
+    return full_data(obj)
+
+
 def get(obj, create=False):
-    pc = obj.data.get(STASH_KEY)
+    pc = _data(obj).get(STASH_KEY)
     if pc is not None and isinstance(pc, bpy.types.PointCloud):
         return pc
     if not create:
         return None
-    pc = bpy.data.pointclouds.new(obj.data.name + "_gsp_stash")
+    pc = bpy.data.pointclouds.new(_data(obj).name + "_gsp_stash")
     pc.resize(0)
     pc.use_fake_user = True
-    obj.data[STASH_KEY] = pc
+    _data(obj)[STASH_KEY] = pc
     return pc
 
 

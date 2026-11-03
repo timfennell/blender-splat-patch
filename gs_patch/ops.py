@@ -5,7 +5,7 @@ import numpy as np
 from bpy_extras.io_utils import ExportHelper
 from mathutils import Vector
 
-from . import core, merge, view, stash
+from . import core, lod, merge, view, stash
 from .splats import _TRACKING
 from .splats import (SplatSet, is_splat_object, major_axes, concat_rows, set_from_rows,
                      SELECT_ATTR, HIDDEN_ATTR, OPACITY_COLUMNS)
@@ -65,8 +65,9 @@ def props_of(context):
 
 
 def bump_revision(obj):
-    rev = int(obj.data.get(_REV_KEY, 0)) + 1
-    obj.data[_REV_KEY] = rev
+    data = lod.full_data(obj)
+    rev = int(data.get(_REV_KEY, 0)) + 1
+    data[_REV_KEY] = rev
     return rev
 
 
@@ -77,7 +78,7 @@ UNDO_SPLAT_LIMIT = 1_000_000
 
 
 def undo_push(obj, message):
-    if obj is not None and len(obj.data.points) <= UNDO_SPLAT_LIMIT:
+    if obj is not None and len(lod.full_data(obj).points) <= UNDO_SPLAT_LIMIT:
         bpy.ops.ed.undo_push(message=message)
 
 
@@ -97,6 +98,12 @@ def commit(context, obj, S, message, only=None):
         if area.type == 'VIEW_3D':
             area.tag_redraw()
     return rev
+
+
+def editable_splats(context):
+    """The active splat object, unless a low-detail proxy is showing (brushes need the model)."""
+    obj = active_splats(context)
+    return None if obj is None or lod.is_proxy(obj) else obj
 
 
 def active_splats(context):
@@ -125,6 +132,9 @@ class GSP_OT_brush(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
+        if lod.is_proxy(context.active_object):
+            cls.poll_message_set("Low detail is showing: bring back Full Detail to edit")
+            return False
         return context.area and context.area.type == 'VIEW_3D' and active_splats(context)
 
     # ---------------------------------------------------------- setup
@@ -1022,6 +1032,9 @@ class _SplatOp:
 
     @classmethod
     def poll(cls, context):
+        if lod.is_proxy(context.active_object):
+            cls.poll_message_set("Low detail is showing: bring back Full Detail to edit")
+            return False
         return active_splats(context) is not None
 
 
@@ -1189,7 +1202,7 @@ class GSP_OT_export_ply(bpy.types.Operator, ExportHelper):
     def execute(self, context):
         obj = active_splats(context)
         STATE["running"] = False
-        n = write_pointcloud_ply(self.filepath, obj.data)
+        n = write_pointcloud_ply(self.filepath, lod.full_data(obj))
         self.report({'INFO'}, f"Wrote {n} splats to {self.filepath}")
         return {'FINISHED'}
 
@@ -1230,7 +1243,7 @@ class GSP_OT_merge_splats(bpy.types.Operator):
         total = 0
         for ob in objs:
             M = to_target @ np.array(ob.matrix_world, np.float64)
-            S = SplatSet.read(ob.data)
+            S = SplatSet.read(lod.full_data(ob))
             rows, why = merge.transform_rows(S.arrays, M)
             del S
             parts.append(rows)
@@ -1243,7 +1256,7 @@ class GSP_OT_merge_splats(bpy.types.Operator):
         parts.clear()
         pc = bpy.data.pointclouds.new(target.data.name + "_merged")
         merged.write(pc)
-        for m in target.data.materials:
+        for m in lod.full_data(target).materials:
             pc.materials.append(m)
         new = target.copy()                     # its transform, modifiers and display settings
         new.data = pc
@@ -1274,7 +1287,7 @@ class GSP_OT_merge_splats(bpy.types.Operator):
 
 def _edit_counts(obj):
     """(erased splats still in the model, erased originals in the stash, tracking columns)."""
-    pc = obj.data
+    pc = lod.full_data(obj)
     hidden = 0
     attr = pc.attributes.get(HIDDEN_ATTR)
     if attr is not None and len(pc.points):
@@ -1312,7 +1325,7 @@ class GSP_OT_bake_edits(bpy.types.Operator):
     def execute(self, context):
         STATE["running"] = False               # the brush's working copy goes too
         obj = active_splats(context)
-        pc = obj.data
+        pc = lod.full_data(obj)                 # a proxy's full model, if one is showing
         hidden, stashed, _ = _edit_counts(obj)
         S = SplatSet.read(pc)
         keep = ~S.hidden
@@ -1342,6 +1355,48 @@ class GSP_OT_bake_edits(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class GSP_OT_low_detail(bpy.types.Operator):
+    """Show the selected splat models as light stand-ins while arranging them: a fraction of
+    their splats (the most visible ones), without view-dependent colour. The full models are
+    kept and come back with Full Detail; export, merge and bake always use them"""
+    bl_idname = "gsp.low_detail"
+    bl_label = "Low Detail"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    fraction: bpy.props.FloatProperty(
+        name="Detail", default=0.1, min=0.005, max=0.9, subtype='FACTOR',
+        description="Share of each model's splats the stand-in keeps")
+
+    @classmethod
+    def poll(cls, context):
+        return bool(_selected_splats(context))
+
+    def execute(self, context):
+        STATE["running"] = False
+        before = after = 0
+        for ob in _selected_splats(context):
+            before += len(lod.full_data(ob).points)
+            after += lod.make_proxy(ob, self.fraction)
+        self.report({'INFO'}, f"Low detail: {after:,} of {before:,} splats showing")
+        return {'FINISHED'}
+
+
+class GSP_OT_full_detail(bpy.types.Operator):
+    """Bring back the full models of the selected splat objects"""
+    bl_idname = "gsp.full_detail"
+    bl_label = "Full Detail"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return any(lod.is_proxy(o) for o in _selected_splats(context))
+
+    def execute(self, context):
+        n = sum(lod.restore(ob) for ob in _selected_splats(context) if lod.is_proxy(ob))
+        self.report({'INFO'}, f"Full detail: {n:,} splats")
+        return {'FINISHED'}
+
+
 class GSP_OT_stop_brush(bpy.types.Operator):
     """Leave the splat brush"""
     bl_idname = "gsp.stop_brush"
@@ -1364,5 +1419,7 @@ classes = (
     GSP_OT_export_ply,
     GSP_OT_merge_splats,
     GSP_OT_bake_edits,
+    GSP_OT_low_detail,
+    GSP_OT_full_detail,
     GSP_OT_stop_brush,
 )

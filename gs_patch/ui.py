@@ -6,6 +6,9 @@ from .splats import is_splat_object
 
 class GSP_Props(bpy.types.PropertyGroup):
     tool: bpy.props.EnumProperty(name="Tool", items=TOOL_ITEMS, default='ERASE')
+    lod_fraction: bpy.props.FloatProperty(
+        name="Detail", default=0.1, min=0.005, max=0.9, subtype='FACTOR',
+        description="Share of each model's splats a low-detail stand-in keeps")
     radius_px: bpy.props.IntProperty(name="Radius", subtype='PIXEL', default=40, min=3, max=1000,
                                      description="Brush radius in screen pixels ([ and ] while painting)")
     feather: bpy.props.FloatProperty(name="Feather", default=0.35, min=0.0, max=1.0, subtype='FACTOR',
@@ -248,5 +251,35 @@ class GSP_PT_export(bpy.types.Panel):
         self.layout.operator("gsp.export_ply", icon='EXPORT')
 
 
+class GSP_PT_lod(bpy.types.Panel):
+    bl_label = "Level of Detail"
+    bl_parent_id = "GSP_PT_panel"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Splat Patch"
+
+    @classmethod
+    def poll(cls, context):
+        return any(is_splat_object(o) for o in context.selected_objects) or is_splat_object(context.active_object)
+
+    def draw(self, context):
+        from . import lod
+        layout = self.layout
+        p = context.scene.gsp
+        obj = context.active_object
+        if is_splat_object(obj):
+            full = lod.full_data(obj)
+            if lod.is_proxy(obj):
+                layout.label(text=f"Low detail: {len(obj.data.points):,} of {len(full.points):,} splats",
+                             icon='MOD_DECIM')
+            else:
+                layout.label(text=f"Full detail: {len(full.points):,} splats", icon='MESH_UVSPHERE')
+        layout.prop(p, "lod_fraction")
+        row = layout.row(align=True)
+        row.operator("gsp.low_detail", icon='MOD_DECIM').fraction = p.lod_fraction
+        row.operator("gsp.full_detail", icon='MESH_UVSPHERE')
+        layout.label(text="Applies to the selected models", icon='INFO')
+
+
 classes = (GSP_Props, GSP_PT_panel, GSP_PT_brush, GSP_PT_sample, GSP_PT_selection,
-           GSP_PT_heal, GSP_PT_shortcuts, GSP_PT_export)
+           GSP_PT_heal, GSP_PT_shortcuts, GSP_PT_lod, GSP_PT_export)
