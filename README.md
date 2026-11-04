@@ -236,6 +236,52 @@ precision, and the merged model renders identically. A non-uniform scale or a mi
 carried exactly by splats: their average scale or nearest rotation is used, with a warning. Merging
 holds a working copy of every model at once (about 250 bytes a splat).
 
+## Mesh to Splats: polygon assets in a splat scene
+
+Select one or more meshes and press **Convert to Splats** (in the **Mesh to Splats** panel). Each mesh
+becomes a splat object, `<mesh>_splats`, with no training: an even UV layout is made for a copy of the
+mesh, Cycles bakes its materials into it, and every covered texel becomes one flat splat lying in the
+surface. Modifiers are included, and image, procedural, Generated and Object textures all come through. The mesh is
+kept, hidden; edit it and press **Convert Again** with the splat object active to refresh it in place.
+Then merge the result with your scans and export one PLY.
+
+**Lighting**
+- **Light on Camera** (default): the colour a scan would have learnt with the light fixed to the camera,
+  the way the bee was captured. That is what Vintage Click's and Spirula Render's relighting read: band 0-1
+  as diffuse from each lamp, bands 2-3 at the half vector as shine. Through the game's relight formula the
+  diffuse comes within about 10 % of true Lambert shading, and the splats cast and receive the game's
+  live shadows like any scan.
+- **Light from Scan:** for putting assets into a scan of a real place, lit by its own light.
+  Spirula Render renders the scan around the object (six views from its centre, with no lens, filter
+  or film, and any uncovered background filled from the World), and Cycles lights the mesh with that
+  as its World, so the asset takes the scan's brightness, colour and direction of light with no
+  tuning: a white ball in a room of display grey 0.6 comes out at 0.54-0.59. The splats themselves
+  are hidden from Cycles, and the scene's lamps only light the asset when Spirula is relighting the
+  scan with them too. The scan's reflections go into the view-dependent colour (bands 1-3: a scan of
+  a place is relit from its base colour alone, so they're free). **Contact Shadows** adds a separate
+  layer, `<mesh>_shadow`, of black splats laid on the scan where the object blocks its light: the
+  share of the surrounding light blocked at each point, on an even grid so they don't stack. The
+  scan's own splats are never changed. Merge the shadow layer along with the asset.
+- **Bake Scene Lighting:** Cycles bakes the scene's lights and shadows into a flat colour. It looks right as it is;
+  relit, the baked shadows stay put.
+
+**Settings**
+- **Splat Spacing:** distance between splats (0: 1/400 of the object's size). Halving it makes four
+  times as many splats.
+- **SH Degree:** *Match Scene* uses the highest degree among your scans, since one PLY has one degree.
+- **Brightness:** exposure of the converted colour; match it to your scans.
+- **Shine:** bands 2-3 can't draw a highlight narrower than about 30 degrees. Shine keeps a narrow
+  highlight's brightness (up to display white) drawn that wide; 0 gives its true, faint spread energy.
+  Bands 2-3 always dip below zero somewhere, so the shine is limited where that dip would darken the
+  surface by more than a third (no black rims on shiny objects).
+- **Reflect Surroundings:** six small renders from the object's centre, with the scene's own engine
+  (a Spirula Render scene shows its splats), blurred for each roughness and baked into bands 2-3.
+  It's a frozen reflection map, not raytracing, and game lamps read it as highlights.
+- **Two-Sided:** splats on both faces, for open surfaces like leaves and cards.
+
+In Spirula Render, set **Shadow Density** to 1 for converted meshes: they're solid, and the default of 4
+(for scans with leaky walls) makes their splats shadow each other in a fine grid.
+
 ## Export
 
 Blender 5.3's PLY exporter writes 0 points for a point cloud, so use **Export > Export Splat PLY**.
@@ -272,4 +318,6 @@ Tests (any 3DGS PLY):
 ```
 blender -b --factory-startup --python tests/test_core.py -- scan.ply
 blender --enable-event-simulate --python tests/test_ui.py -- scan.ply
+blender -b --factory-startup --python tests/test_convert.py
+blender -b --factory-startup --python tests/test_scan_light.py    # needs Spirula Render
 ```

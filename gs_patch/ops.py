@@ -1503,6 +1503,76 @@ class GSP_OT_stop_brush(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class GSP_OT_convert_mesh(bpy.types.Operator):
+    """Turn the selected meshes into Gaussian splat objects (no training): one flat splat per
+    texel of an even UV layout, coloured from a Cycles bake of the materials, lit from the
+    camera (relights like a scan), by the scene's lights, or by the scan around it. The mesh
+    is kept, hidden, to edit and convert again; merge the result with your scans to export one PLY"""
+    bl_idname = "gsp.convert_mesh"
+    bl_label = "Convert to Splats"
+    bl_options = {'REGISTER'}
+
+    @classmethod
+    def poll(cls, context):
+        from .mesh_convert import SOURCE_KEY
+        if context.mode != 'OBJECT':
+            return False
+        if any(o.type == 'MESH' for o in context.selected_objects):
+            return True
+        obj = context.active_object
+        src = obj.get(SOURCE_KEY) if obj is not None else None
+        return isinstance(src, str) and src in bpy.data.objects
+
+    def execute(self, context):
+        from . import mesh_convert as mc
+        STATE["running"] = False
+        p = context.scene.gsp
+        meshes = [o for o in context.selected_objects if o.type == 'MESH']
+        if not meshes:                     # "Convert Again" from a converted object
+            src = bpy.data.objects.get(context.active_object.get(mc.SOURCE_KEY))
+            meshes = [src] if src is not None and src.type == 'MESH' else []
+        if not meshes:
+            self.report({'ERROR'}, "Select a mesh to convert")
+            return {'CANCELLED'}
+        degree = mc.scene_sh_degree(context.scene) if p.conv_degree == 'AUTO' else int(p.conv_degree)
+        st = mc.Settings(spacing=p.conv_spacing, degree=degree, lighting=p.conv_lighting,
+                         gain=p.conv_gain, shine=p.conv_shine, reflections=p.conv_reflections,
+                         reflect_strength=p.conv_reflect_strength, probe_res=p.conv_probe_res,
+                         bake_samples=p.conv_bake_samples, two_sided=p.conv_two_sided,
+                         contact_shadows=p.conv_contact_shadows, shadow_strength=p.conv_shadow_strength,
+                         shadow_reach=p.conv_shadow_reach)
+        made, total = [], 0
+        wm = context.window_manager
+        wm.progress_begin(0, len(meshes))
+        try:
+            for i, ob in enumerate(meshes):
+                try:
+                    rows, info = mc.convert(context, ob, st, report=lambda m: print("Splat Patch:", m))
+                except mc.ConvertError as e:
+                    self.report({'ERROR'}, f"{ob.name}: {e}")
+                    return {'CANCELLED'}
+                new = mc.write_object(context, ob, rows)
+                del rows
+                mc.write_object(context, ob, info.get("shadow"), mc.SHADOW_KEY, "_shadow")
+                made.append(new)
+                total += info["splats"]
+                if p.conv_hide_source:
+                    ob.hide_set(True)
+                    ob.hide_render = True
+                wm.progress_update(i + 1)
+        finally:
+            wm.progress_end()
+        for o in context.view_layer.objects:
+            o.select_set(False)
+        for o in made:
+            o.select_set(True)
+        context.view_layer.objects.active = made[-1]
+        undo_push(made[-1], self.bl_label)
+        self.report({'INFO'}, f"Converted {len(made)} mesh{'es' if len(made) > 1 else ''} into "
+                              f"{total:,} splats (SH degree {degree})")
+        return {'FINISHED'}
+
+
 classes = (
     GSP_OT_brush,
     GSP_OT_select_all,
@@ -1514,6 +1584,7 @@ classes = (
     GSP_OT_source_from_cursor,
     GSP_OT_export_ply,
     GSP_OT_merge_splats,
+    GSP_OT_convert_mesh,
     GSP_OT_bake_edits,
     GSP_OT_low_detail,
     GSP_OT_full_detail,

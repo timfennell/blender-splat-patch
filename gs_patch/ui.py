@@ -64,6 +64,68 @@ class GSP_Props(bpy.types.PropertyGroup):
     floater_keep: bpy.props.FloatProperty(
         name="Keep Clumps Above", default=0.02, min=0.0, max=1.0, subtype='FACTOR',
         description="Clumps at least this fraction of the largest one are kept (e.g. detached legs)")
+    # ------------------------------------------------------- mesh to splats
+    conv_spacing: bpy.props.FloatProperty(
+        name="Splat Spacing", default=0.0, min=0.0, unit='LENGTH', precision=4,
+        description="Distance between splats on the surface (0 = 1/400 of the object's size). "
+                    "Halving it makes four times as many splats")
+    conv_degree: bpy.props.EnumProperty(name="SH Degree", items=[
+        ('AUTO', "Match Scene", "The highest degree among the scene's scans (3 if there are none): "
+                                "every splat in one PLY must use the same degree"),
+        ('0', "0", "Colour only: no view-dependent shading, and nothing for relighting"),
+        ('1', "1", "Diffuse shading only"),
+        ('2', "2", "Diffuse and broad shine"),
+        ('3', "3", "Diffuse and the sharpest shine splats can hold"),
+    ], default='AUTO')
+    conv_lighting: bpy.props.EnumProperty(name="Lighting", items=[
+        ('HEADLIGHT', "Light on Camera",
+         "Colour as a scan lit from the camera would learn it, so the splats relight like your scans"),
+        ('SCAN', "Light from Scan",
+         "Lit by the scan around it: Spirula Render renders the surroundings from the object, Cycles lights the "
+         "mesh with that, the scan's reflections go into the view-dependent colour, and a contact shadow layer "
+         "darkens the scan beneath. For scans of real places, lit by their own light"),
+        ('BAKED', "Bake Scene Lighting",
+         "Cycles bakes the scene's lights and shadows into a flat colour: looks right as it is, "
+         "but the shadows stay put when relit"),
+    ], default='HEADLIGHT')
+    conv_gain: bpy.props.FloatProperty(
+        name="Brightness", default=1.0, min=0.0, soft_max=4.0,
+        description="Exposure of the converted colour (1: a white surface facing the light is display white). "
+                    "Match it to your scans")
+    conv_shine: bpy.props.FloatProperty(
+        name="Shine", default=1.0, min=0.0, soft_max=3.0,
+        description="How bright highlights narrower than the splats can draw are kept (0: their true, "
+                    "faint spread-out energy)")
+    conv_reflections: bpy.props.BoolProperty(
+        name="Reflect Surroundings", default=False,
+        description="Bake a blurred reflection of the surroundings (rendered from the object's centre with the "
+                    "scene's engine) into the shine. Looks right under the scan's own light; game lamps read "
+                    "it as highlights")
+    conv_reflect_strength: bpy.props.FloatProperty(
+        name="Reflection", default=1.0, min=0.0, soft_max=2.0, subtype='FACTOR',
+        description="Strength of the baked reflection")
+    conv_probe_res: bpy.props.IntProperty(
+        name="Probe Size", default=64, min=16, max=512, subtype='PIXEL',
+        description="Size of each of the six renders of the surroundings")
+    conv_bake_samples: bpy.props.IntProperty(
+        name="Bake Samples", default=64, min=1, max=4096,
+        description="Cycles samples for baking the scene's lighting")
+    conv_contact_shadows: bpy.props.BoolProperty(
+        name="Contact Shadows", default=True,
+        description="Darken the scan where the object blocks its light, with a separate layer of black splats "
+                    "(<mesh>_shadow); the scan itself isn't changed")
+    conv_shadow_strength: bpy.props.FloatProperty(
+        name="Shadow Strength", default=1.0, min=0.0, soft_max=2.0, subtype='FACTOR',
+        description="How dark the contact shadow is (1: the share of the scan's light the object blocks)")
+    conv_shadow_reach: bpy.props.FloatProperty(
+        name="Shadow Reach", default=0.0, min=0.0, unit='LENGTH',
+        description="How far from the object the scan is shadowed (0 = half the object's size)")
+    conv_two_sided: bpy.props.BoolProperty(
+        name="Two-Sided", default=False,
+        description="Splats on both faces, for open surfaces seen from behind (leaves, cards, planes)")
+    conv_hide_source: bpy.props.BoolProperty(
+        name="Hide Mesh", default=True,
+        description="Hide the mesh after converting (it is kept, to edit and convert again)")
 
 
 class GSP_PT_panel(bpy.types.Panel):
@@ -293,5 +355,56 @@ class GSP_PT_lod(bpy.types.Panel):
         row.operator("gsp.leave_workarea", icon='LOOP_BACK')
 
 
+class GSP_PT_convert(bpy.types.Panel):
+    bl_label = "Mesh to Splats"
+    bl_parent_id = "GSP_PT_panel"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Splat Patch"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        from .mesh_convert import SOURCE_KEY
+        layout = self.layout
+        p = context.scene.gsp
+        layout.prop(p, "conv_spacing")
+        layout.prop(p, "conv_degree")
+        layout.prop(p, "conv_lighting")
+        layout.prop(p, "conv_gain")
+        if p.conv_lighting == 'HEADLIGHT':
+            layout.prop(p, "conv_shine")
+            col = layout.column()
+            col.enabled = p.conv_degree != '0' and p.conv_degree != '1'
+            col.prop(p, "conv_reflections")
+            sub = col.column(align=True)
+            sub.enabled = p.conv_reflections
+            sub.prop(p, "conv_reflect_strength")
+            sub.prop(p, "conv_probe_res")
+        elif p.conv_lighting == 'SCAN':
+            col = layout.column(align=True)
+            col.prop(p, "conv_bake_samples")
+            col.prop(p, "conv_probe_res")
+            col.prop(p, "conv_reflect_strength")
+            box = layout.box()
+            box.prop(p, "conv_contact_shadows")
+            sub = box.column(align=True)
+            sub.enabled = p.conv_contact_shadows
+            sub.prop(p, "conv_shadow_strength")
+            sub.prop(p, "conv_shadow_reach")
+        else:
+            layout.prop(p, "conv_bake_samples")
+        row = layout.row()
+        row.prop(p, "conv_two_sided")
+        row.prop(p, "conv_hide_source")
+        row = layout.row()
+        row.scale_y = 1.3
+        meshes = [o for o in context.selected_objects if o.type == 'MESH']
+        obj = context.active_object
+        if not meshes and obj is not None and obj.get(SOURCE_KEY):
+            row.operator("gsp.convert_mesh", text="Convert Again", icon='FILE_REFRESH')
+        else:
+            row.operator("gsp.convert_mesh", icon='POINTCLOUD_DATA')
+
+
 classes = (GSP_Props, GSP_PT_panel, GSP_PT_brush, GSP_PT_sample, GSP_PT_selection,
-           GSP_PT_heal, GSP_PT_shortcuts, GSP_PT_lod, GSP_PT_export)
+           GSP_PT_heal, GSP_PT_shortcuts, GSP_PT_lod, GSP_PT_export, GSP_PT_convert)

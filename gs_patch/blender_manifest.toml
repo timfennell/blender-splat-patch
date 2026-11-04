@@ -1,9 +1,9 @@
 schema_version = "1.0.0"
 
 id = "gs_patch"
-version = "0.1.17"
+version = "0.2.0"
 name = "Gaussian Splat Patch"
-tagline = "Erase, clone stamp and heal Gaussian splat point clouds"
+tagline = "Erase, clone and heal splats, and turn meshes into splats"
 maintainer = "Tim Fennell"
 type = "add-on"
 
