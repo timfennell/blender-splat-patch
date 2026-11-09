@@ -263,3 +263,20 @@ def draw_wire_sphere(matrix_world, center, radius, color, segments=64):
     shader.uniform_float("color", color)
     batch.draw(shader)
     gpu.state.blend_set('NONE')
+
+
+def draw_lines(matrix_world, pts, color):
+    """Line segments (pairs of points in the object's own space) drawn in the 3D view."""
+    if not len(pts):
+        return
+    M = np.array(matrix_world, np.float64)
+    w = (np.asarray(pts, np.float64) @ M[:3, :3].T + M[:3, 3]).astype(np.float32)
+    shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+    batch = batch_for_shader(shader, 'LINES', {"pos": w.tolist()})
+    gpu.state.blend_set('ALPHA')
+    gpu.state.line_width_set(2.0)
+    shader.bind()
+    shader.uniform_float("color", color)
+    batch.draw(shader)
+    gpu.state.line_width_set(1.0)
+    gpu.state.blend_set('NONE')

@@ -2,6 +2,7 @@ import bpy
 
 from .ops import TOOL_ITEMS, STATE, SHORTCUTS
 from .splats import is_splat_object
+from .volumes import SHAPES as VOLUME_SHAPES
 
 
 class GSP_Props(bpy.types.PropertyGroup):
@@ -45,6 +46,10 @@ class GSP_Props(bpy.types.PropertyGroup):
                                      description="Regrown splat density relative to the surroundings")
     cursor_radius: bpy.props.FloatProperty(name="Radius", default=0.1, min=0.0, unit='LENGTH')
     show_selection: bpy.props.BoolProperty(name="Show Selection", default=True)
+    volume_shape: bpy.props.EnumProperty(name="Shape", items=VOLUME_SHAPES, default='BOX')
+    volume: bpy.props.PointerProperty(name="Volume", type=bpy.types.Object,
+                                      poll=lambda self, ob: ob.type == 'EMPTY' and "gsp_volume" in ob,
+                                      description="The selection volume the buttons use")
     restore_erased: bpy.props.BoolProperty(
         name="Restore Erased", default=True,
         description="Bring back splats that edits erased or faded (red and yellow)")
@@ -230,12 +235,26 @@ class GSP_PT_selection(bpy.types.Panel):
 
     @classmethod
     def poll(cls, context):
-        return is_splat_object(context.active_object)
+        ob = context.active_object
+        return is_splat_object(ob) or (ob is not None and ob.type == 'EMPTY' and "gsp_volume" in ob)
 
     def draw(self, context):
         layout = self.layout
         p = context.scene.gsp
         layout.prop(p, "show_selection")
+        box = layout.box()
+        box.label(text="Volume", icon='MOD_WIREFRAME')
+        row = box.row(align=True)
+        row.prop(p, "volume_shape", text="")
+        row.operator("gsp.add_volume", text="Add", icon='ADD').shape = p.volume_shape
+        box.prop(p, "volume", text="")
+        row = box.row(align=True)
+        row.operator("gsp.volume_select", text="Select", icon='ADD').action = 'SELECT'
+        row.operator("gsp.volume_select", text="Deselect", icon='REMOVE').action = 'DESELECT'
+        row.operator("gsp.volume_select", text="Only", icon='RESTRICT_SELECT_OFF').action = 'ONLY'
+        box.operator("gsp.remove_volume", icon='X')
+        if not is_splat_object(context.active_object):
+            return
         row = layout.row(align=True)
         row.operator("gsp.select_all", text="All").action = 'SELECT'
         row.operator("gsp.select_all", text="None").action = 'DESELECT'

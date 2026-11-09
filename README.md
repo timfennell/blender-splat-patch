@@ -176,6 +176,23 @@ can keep refining. Edits made before version 0.1.3 were not recorded and can't b
 3. **Fill From Surroundings** (spot-heal the selection), or **Fill From Sample**: clone the area around
    the sample point into the gap, trimmed to the gap's footprint, feathered and colour-matched.
 
+### Selection volumes
+
+To select a region by shape, pick **Box**, **Sphere**, **Cylinder** or **Cone** under *Volume* and press
+**Add**. A wireframe of that shape appears at the 3D cursor, sized to the model. It's an ordinary object:
+move (**G**), rotate (**R**) and scale (**S**) it, scaling each axis on its own for a brick, an ellipsoid
+or a squat cylinder. The splats it holds stay highlighted while you adjust it. Then:
+
+- **Select** adds the splats inside it to the selection;
+- **Deselect** takes them out (to carve a shape out of a painted selection);
+- **Only** selects them and nothing else.
+
+Add as many volumes as you like; the buttons use the active one, or the last one added. **Remove Volume**
+deletes it. Volumes never render. Erased splats, and a work area's low-detail surroundings, are never
+selected.
+
+![A cylinder turned and stretched over a bee's abdomen, the splats inside it selected in orange](docs/images/selection_volume.jpg)
+
 The fill fits a smooth surface to the ring of splats around the gap, finds the gap in that surface, and
 fills it to the ring's density. Heal Settings (Border, Grain, Colour Smoothing, Density) tune it.
 

@@ -5,7 +5,7 @@ import numpy as np
 from bpy_extras.io_utils import ExportHelper
 from mathutils import Vector
 
-from . import core, lod, merge, view, stash
+from . import core, lod, merge, view, stash, volumes
 from .splats import _TRACKING, LOCKED_ATTR, FULL_INDEX_ATTR
 from .splats import (SplatSet, is_splat_object, major_axes, concat_rows, set_from_rows,
                      SELECT_ATTR, HIDDEN_ATTR, OPACITY_COLUMNS)
@@ -986,6 +986,8 @@ def draw_selection():
     ctx = bpy.context
     p = getattr(ctx.scene, "gsp", None)
     obj = ctx.active_object
+    if volumes.shape_of(obj):                   # adjusting a volume: show its model's selection
+        obj = bpy.data.objects.get(obj.get(volumes.TARGET_KEY, ""))
     if p is None or not p.show_selection or not is_splat_object(obj):
         return
     pc = obj.data
@@ -1116,6 +1118,147 @@ class GSP_OT_select_cursor_sphere(_SplatOp, bpy.types.Operator):
         bump_revision(obj)
         self.report({'INFO'}, f"Selected {int(m.sum())} splats")
         return {'FINISHED'}
+
+
+def _volume_and_target(context):
+    """The selection volume (the active one, else the scene's last) and the splat object it acts
+    on (the active one if it's a splat object, else the one the volume was made for)."""
+    p = props_of(context)
+    act = context.active_object
+    vol = act if volumes.shape_of(act) else p.volume
+    if vol is None or not volumes.shape_of(vol) or vol.name not in context.scene.objects:
+        return None, None
+    target = act if is_splat_object(act) else bpy.data.objects.get(vol.get(volumes.TARGET_KEY, ""))
+    if target is None or not is_splat_object(target) or lod.is_proxy(target):
+        return vol, None
+    return vol, target
+
+
+class GSP_OT_add_volume(bpy.types.Operator):
+    """Add a selection volume at the 3D cursor: move (G), turn (R) and scale (S) it, then select
+    or deselect the splats inside it"""
+    bl_idname = "gsp.add_volume"
+    bl_label = "Add Volume"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    shape: bpy.props.EnumProperty(name="Shape", items=volumes.SHAPES, default='BOX')
+
+    @classmethod
+    def poll(cls, context):
+        return active_splats(context) is not None
+
+    def execute(self, context):
+        target = active_splats(context)
+        p = props_of(context)
+        empty = bpy.data.objects.new(f"Selection {self.shape.capitalize()}", None)
+        empty.empty_display_type = 'PLAIN_AXES'
+        empty.empty_display_size = 1.0
+        empty.hide_render = True
+        empty.show_in_front = True
+        empty[volumes.SHAPE_KEY] = self.shape
+        empty[volumes.TARGET_KEY] = target.name
+        # a fifth of the model's size, to start (from its splats: a point cloud's dimensions
+        # can be zero until the view updates)
+        pc = target.data
+        n = len(pc.points)
+        pos = np.empty(n * 3, np.float32)
+        if n:
+            pc.attributes["position"].data.foreach_get("vector", pos)
+        pos = pos.reshape(-1, 3)[::max(1, n // 50000)]
+        M = np.array(target.matrix_world, np.float64)
+        w = pos @ M[:3, :3].T + M[:3, 3]
+        ext = float(np.max(np.percentile(w, 98, 0) - np.percentile(w, 2, 0))) if len(w) else 1.0
+        size = max(ext * 0.1, 1e-4)
+        empty.location = context.scene.cursor.location
+        empty.scale = (size, size, size)
+        coll = context.collection or context.scene.collection
+        coll.objects.link(empty)
+        for ob in context.view_layer.objects:
+            ob.select_set(False)
+        empty.select_set(True)
+        context.view_layer.objects.active = empty
+        p.volume = empty
+        self.report({'INFO'}, "Move (G), turn (R) and scale (S) the volume, then Select or Deselect Inside")
+        return {'FINISHED'}
+
+
+class GSP_OT_volume_select(bpy.types.Operator):
+    """Select or deselect the splats inside the selection volume"""
+    bl_idname = "gsp.volume_select"
+    bl_label = "Select Inside Volume"
+    bl_options = {'REGISTER'}
+
+    action: bpy.props.EnumProperty(items=[
+        ('SELECT', "Select", "Add the splats inside to the selection"),
+        ('DESELECT', "Deselect", "Remove the splats inside from the selection"),
+        ('ONLY', "Select Only", "Select the splats inside and nothing else"),
+    ], default='SELECT')
+
+    @classmethod
+    def description(cls, context, props):
+        return {'SELECT': "Add the splats inside the volume to the selection",
+                'DESELECT': "Remove the splats inside the volume from the selection",
+                'ONLY': "Select only the splats inside the volume"}[props.action]
+
+    @classmethod
+    def poll(cls, context):
+        vol, target = _volume_and_target(context)
+        if vol is None:
+            cls.poll_message_set("Add a selection volume first")
+            return False
+        if target is None:
+            cls.poll_message_set("The volume's splat object is gone, or showing Low Detail")
+            return False
+        return True
+
+    def execute(self, context):
+        STATE["running"] = False               # the brush reloads with the new selection
+        vol, obj = _volume_and_target(context)
+        S = SplatSet.read(obj.data)
+        m = volumes.inside(vol[volumes.SHAPE_KEY], volumes.to_volume_space(vol, obj, S.pos)) & S.visible
+        if self.action == 'ONLY':
+            S.selected[:] = False
+        if self.action == 'DESELECT':
+            S.selected[m] = False
+        else:
+            S.selected[m] = True
+        save(obj, S, only=(SELECT_ATTR,))
+        bump_revision(obj)
+        undo_push(obj, self.bl_label)
+        verb = "Deselected" if self.action == 'DESELECT' else "Selected"
+        self.report({'INFO'}, f"{verb} {int(m.sum()):,} splats inside '{vol.name}' "
+                              f"({int(S.selected.sum()):,} selected in '{obj.name}')")
+        return {'FINISHED'}
+
+
+class GSP_OT_remove_volume(bpy.types.Operator):
+    """Delete the selection volume and go back to its splat object"""
+    bl_idname = "gsp.remove_volume"
+    bl_label = "Remove Volume"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return _volume_and_target(context)[0] is not None
+
+    def execute(self, context):
+        vol, target = _volume_and_target(context)
+        bpy.data.objects.remove(vol)
+        if target is not None:
+            target.select_set(True)
+            context.view_layer.objects.active = target
+        return {'FINISHED'}
+
+
+def draw_volumes():
+    """The wireframe of every visible selection volume (brighter when it's the active object)."""
+    ctx = bpy.context
+    for ob in ctx.visible_objects if hasattr(ctx, "visible_objects") else ():
+        shape = volumes.shape_of(ob)
+        if shape:
+            on = ob == ctx.active_object or ob.select_get()
+            view.draw_lines(ob.matrix_world, volumes.wire(shape),
+                            (0.35, 0.8, 1.0, 0.95) if on else (0.35, 0.8, 1.0, 0.45))
 
 
 class GSP_OT_delete_selected(_SplatOp, bpy.types.Operator):
@@ -1579,6 +1722,9 @@ classes = (
     GSP_OT_select_faint,
     GSP_OT_select_floaters,
     GSP_OT_select_cursor_sphere,
+    GSP_OT_add_volume,
+    GSP_OT_volume_select,
+    GSP_OT_remove_volume,
     GSP_OT_delete_selected,
     GSP_OT_fill_selected,
     GSP_OT_source_from_cursor,
