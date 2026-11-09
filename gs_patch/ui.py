@@ -145,7 +145,18 @@ class GSP_PT_panel(bpy.types.Panel):
         p = context.scene.gsp
         obj = context.active_object
         if not is_splat_object(obj):
-            layout.label(text="Select a Gaussian splat object", icon='INFO')
+            meshes = [o for o in context.selected_objects if o.type == 'MESH']
+            if meshes:
+                # a polygon object: turn it into splats (settings in Mesh to Splats below)
+                box = layout.box()
+                box.label(text=f"{len(meshes)} mesh{'es' if len(meshes) > 1 else ''} selected",
+                          icon='MESH_DATA')
+                row = box.row()
+                row.scale_y = 1.3
+                row.operator("gsp.convert_mesh", icon='POINTCLOUD_DATA')
+                box.label(text="Settings: Mesh to Splats, below", icon='DOWNARROW_HLT')
+                return
+            layout.label(text="Select a Gaussian splat object, or a mesh to convert", icon='INFO')
             layout.operator("wm.ply_import", text="Import PLY", icon='IMPORT')
             layout.operator("wm.spz_import", text="Import SPZ", icon='IMPORT')
             return
@@ -380,7 +391,14 @@ class GSP_PT_convert(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Splat Patch"
-    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        # with a mesh selected, or a splat object made from one (to convert it again)
+        from .mesh_convert import SOURCE_KEY
+        ob = context.active_object
+        return any(o.type == 'MESH' for o in context.selected_objects) or \
+            (ob is not None and bool(ob.get(SOURCE_KEY)))
 
     def draw(self, context):
         from .mesh_convert import SOURCE_KEY

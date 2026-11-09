@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "gs_patch"
-version = "0.2.1"
+version = "0.2.2"
 name = "Gaussian Splat Patch"
 tagline = "Erase, clone and heal splats, and turn meshes into splats"
 maintainer = "Tim Fennell"

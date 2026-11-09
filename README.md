@@ -255,7 +255,7 @@ holds a working copy of every model at once (about 250 bytes a splat).
 
 ## Mesh to Splats: polygon assets in a splat scene
 
-Select one or more meshes and press **Convert to Splats** (in the **Mesh to Splats** panel). Each mesh
+Select one or more meshes and press **Convert to Splats**: with a mesh selected it's at the top of the Splat Patch tab, and its settings are in the **Mesh to Splats** panel below. Each mesh
 becomes a splat object, `<mesh>_splats`, with no training: an even UV layout is made for a copy of the
 mesh, Cycles bakes its materials into it, and every covered texel becomes one flat splat lying in the
 surface. Modifiers are included, and image, procedural, Generated and Object textures all come through. The mesh is
